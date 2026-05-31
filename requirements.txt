@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+httpx
+google-adk==1.33.0
+requests
