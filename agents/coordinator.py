@@ -1,6 +1,8 @@
 # PhotoConcierge: ユーザーの意図を判定してL2エージェントにルーティングする
 
 from google.adk.agents import LlmAgent
+from google.adk.planners import BuiltInPlanner
+from google.genai import types
 from agents.forecast import forecast_agent
 from agents.record import record_agent
 
@@ -53,10 +55,22 @@ COORDINATOR_INSTRUCTION = """
 
 photo_concierge = LlmAgent(
     name="PhotoConcierge",
+    # gemini-3.1-flash-lite に変更したところ、ルーティング判定の指示追従性が
+    # 不十分で「草」等のスラングを地点名扱いするなどの誤動作が出たため
+    # gemini-2.5-flash に戻す。Coordinator は判断ミスがユーザー体験を直接
+    # 損なう役割なので、速度よりも正確性を優先する。
     model="gemini-2.5-flash",
     description="ユーザーの意図を判定し、予測・記録・案内の適切な処理に振り分けるコーディネーター。",
     instruction=COORDINATOR_INSTRUCTION,
     sub_agents=[forecast_agent, record_agent],
+    # 「こんばんは」のような短い入力でも 2.5-flash の内部思考に時間がかかり
+    # 1 分超のレイテンシが出ていたため、思考時間を抑制する。
+    # ルーティング判定は instruction で明示しており深い思考は不要なので
+    # thinking_budget=0 でほぼ即応答にする。
+    # 判定精度が落ちる場合は 128〜512 に引き上げて調整する。
+    planner=BuiltInPlanner(
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+    ),
 )
 
 root_agent = photo_concierge

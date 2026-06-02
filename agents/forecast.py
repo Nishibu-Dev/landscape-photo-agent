@@ -302,6 +302,10 @@ fetch_all_forecasts_tool      = FunctionTool(func=fetch_all_forecasts)
 
 forecast_agent = LlmAgent(
     name="ForecastAgent",
+    # 速度改善: gemini-2.5-flash → gemini-3.1-flash-lite。
+    # 3.1-flash-lite は 2.5 Flash 相当の指示追従性・品質を保ちつつ
+    # レイテンシが小さく、複数ツール往復を伴う本エージェントの
+    # 処理時間短縮に効く。予測精度は出力を見て要確認。
     model="gemini-2.5-flash",
     description=(
         "ユーザーが指定した地点の翌朝の撮影コンディション"
@@ -317,7 +321,11 @@ forecast_agent = LlmAgent(
         fetch_all_forecasts_tool,
     ],
     output_key="prediction_result",
-    # 同じ気象データに対する確率出力のブレを抑えるため低温度に固定
+    # 同じ気象データに対する確率出力のブレを抑えるため低温度に固定。
+    # ※ gemini-2.5-flash 系は thinking がモデル既定機能のため、
+    #   thinking_budget を明示設定すると 400 エラーになる場合がある。
+    #   よって thinking は設定せずモデル既定に任せる。
+    #   速度はモデル選定(将来 3.1-flash 等)と min-instances で稼ぐ。
     generate_content_config=types.GenerateContentConfig(
         temperature=0.1,
     ),
