@@ -320,20 +320,49 @@ def _build_summary(spot_name: str, factor: float, hourly: list,
     return "\n".join(lines)
 
 
-def _build_prediction_record(forecast_result: dict) -> dict | None:
-    """fetch_forecast の結果を predictions.json 用レコードに変換。error付きは None。"""
+async def _build_prediction_record(forecast_result: dict) -> dict | None:
+    """
+    fetch_forecast の結果を predictions.json 用レコードに変換。error付きは None。
+
+    spot_group(湿原系/高原系等)・tags・pattern・phenomena_priority は
+    classify_spot_group から取得して保存する。これにより分析エージェントが
+    predictions.json を読むだけで「予測当時の地形判定」を取得できる。
+    未知地点で初回(まだ自動分類キャッシュに無い)の場合は空のままになるが、
+    save_auto_classification 後の2回目以降は埋まる。
+    """
     if forecast_result.get("error"):
         return None
     now = _jst_now()
     spot_name = forecast_result.get("spot_name", "")
+
+    # タグ・パターン情報を取得(分析エージェント用に予測当時のスナップショットとして残す)。
+    # 取得失敗時(spot_groups.json未配置等)も予測本体は止めない。
+    spot_group = ""
+    tags: list[str] = []
+    pattern = ""
+    phenomena_priority: dict = {}
+    try:
+        from tools.location import classify_spot_group  # 遅延import(循環回避)
+        info = await classify_spot_group(spot_name)
+        if info.get("found"):
+            spot_group = info.get("main_group") or ""
+            tags = info.get("tags", []) or []
+            pattern = info.get("pattern") or ""
+            phenomena_priority = info.get("phenomena_priority", {}) or {}
+    except Exception as e:
+        print(f"[WARN] classify_spot_group failed for {spot_name}: {e}")
+
     return {
         "id": f"pred_{now.strftime('%Y%m%d%H%M%S%f')}_{spot_name}",
         "spot_name": spot_name,
-        "spot_group": "",  # 確定はLLM側。スナップショットでは空。
-        "elev": forecast_result.get("elev"),  # 標高(m)。登録地点 or Elevation API由来。
+        "spot_group": spot_group,                       # 例: 湿原系 / 高原系
+        "tags": tags,                                   # 例: ["盆地地形","水域近接"]
+        "pattern": pattern,                             # 例: "A" / "B" / ""
+        "phenomena_priority": phenomena_priority,       # 例: {"霧氷":"高",...}
+        "elev": forecast_result.get("elev"),            # 標高(m)。登録地点 or Elevation API由来。
         "target_date": forecast_result.get("target_date", ""),
         "predicted_at": now.isoformat(),
-        "target_phenomena": [],  # スナップショット時点では未確定
+        "target_phenomena": [],                          # スナップショット時点では未確定
         "weather_data": {
             "time_range": forecast_result.get("time_range", TIME_RANGE_LABEL),
             "prev_day_precip_mm": forecast_result.get("prev_day_precip_mm", 0.0),
@@ -355,7 +384,7 @@ async def _save_prediction_snapshot(forecast_result: dict) -> None:
     """
     if not PREDICTIONS_FILE_ID:
         return
-    record = _build_prediction_record(forecast_result)
+    record = await _build_prediction_record(forecast_result)
     if record is None:
         return
     from tools.storage import append_to_json_list  # 遅延import(循環回避)
@@ -379,7 +408,7 @@ async def _save_prediction_snapshots_bulk(forecast_results: list[dict]) -> None:
         return
     records = []
     for r in forecast_results:
-        rec = _build_prediction_record(r)
+        rec = await _build_prediction_record(r)
         if rec is not None:
             records.append(rec)
     if not records:
