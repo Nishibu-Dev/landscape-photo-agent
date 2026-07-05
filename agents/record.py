@@ -9,6 +9,9 @@ from google.genai import types
 from tools.storage import append_to_json_list, find_latest_prediction_id
 from tools.location import resolve_location
 from tools.weather import fetch_historical_weather
+from tools.logger import get_logger
+
+logger = get_logger(__name__)
 
 ACTUALS_FILE_ID = os.environ.get("ACTUALS_FILE_ID", "")
 PREDICTIONS_FILE_ID = os.environ.get("PREDICTIONS_FILE_ID", "")
@@ -116,6 +119,7 @@ async def save_actual(
                 observation_date=resolved_date,
             )
         except Exception as e:
+            logger.exception(f"save_actual: fetch_historical_weather failed spot={resolved_name} date={resolved_date}")
             historical_weather = {
                 "time_range": "前夜21時〜翌日6時",
                 "hourly_actual": [],
@@ -132,6 +136,7 @@ async def save_actual(
                 target_date=resolved_date,
             )
         except Exception:
+            logger.exception(f"save_actual: find_latest_prediction_id failed spot={resolved_name} date={resolved_date}")
             linked_prediction_id = None
 
     record = {

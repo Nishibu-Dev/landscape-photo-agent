@@ -18,6 +18,9 @@ import json
 import httpx
 
 from config.spots import get_spot_by_name, DEFAULT_SPOTS
+from tools.logger import get_logger
+
+logger = get_logger(__name__)
 
 # spot_groups.json の Drive ファイルID。未設定ならキャッシュ機能は無効化(座標解決は動く)。
 SPOT_GROUPS_FILE_ID = os.environ.get("SPOT_GROUPS_FILE_ID", "")
@@ -158,6 +161,7 @@ async def geocode_unknown_spot(place_name: str) -> dict | None:
             resp.raise_for_status()
             data = resp.json()
     except Exception:
+        logger.exception(f"Places API search failed place_name={place_name}")
         return None
 
     places = data.get("places", [])
@@ -200,7 +204,7 @@ async def _fetch_elevation(lat: float, lng: float) -> int | None:
         if results and "elevation" in results[0]:
             return round(results[0]["elevation"])
     except Exception:
-        pass
+        logger.warning(f"Elevation API failed lat={lat} lng={lng}", exc_info=True)
     return None
 
 
@@ -224,7 +228,7 @@ async def _read_spot_groups() -> dict:
                 data["auto_classified"] = {}
             return data
     except Exception:
-        pass
+        logger.exception(f"spot_groups.json 読み込み失敗 file_id={SPOT_GROUPS_FILE_ID}")
     return {"spot_attributes": {}, "auto_classified": {}}
 
 
@@ -339,6 +343,7 @@ async def save_auto_classification(
         if not isinstance(data, dict):
             data = {}
     except Exception:
+        logger.exception(f"save_auto_classification: spot_groups.json 読み込み失敗 spot={spot_name}")
         data = {}
 
     data.setdefault("spot_attributes", {})
@@ -359,6 +364,7 @@ async def save_auto_classification(
     try:
         await write_json(SPOT_GROUPS_FILE_ID, data)
     except Exception as e:
+        logger.exception(f"save_auto_classification: spot_groups.json 書き込み失敗 spot={spot_name}")
         return {"status": "error", "reason": str(e)}
 
     return {"status": "ok", "cached": spot_name}

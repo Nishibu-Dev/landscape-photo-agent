@@ -25,6 +25,9 @@ from tools.location import (
     save_auto_classification,
 )
 from tools.storage import append_to_json_list
+from tools.logger import get_logger
+
+logger = get_logger(__name__)
 
 PREDICTIONS_FILE_ID = os.environ.get("PREDICTIONS_FILE_ID", "")
 

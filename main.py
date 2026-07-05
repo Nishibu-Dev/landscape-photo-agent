@@ -3,6 +3,7 @@ import hmac
 import hashlib
 import base64
 import json
+import uuid
 from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
@@ -12,8 +13,11 @@ from google.genai import types as genai_types
 
 from agents.coordinator import root_agent
 from tools.line_client import push_message
+from tools.logger import get_logger, trace_id_var, user_id_var
 # 利用ログ記録は GAS 受付係側に移管したため Cloud Run では扱わない。
 # 旧 tools/usage_log.py はデッドコードとして残してあるが、ここからは呼ばない。
+
+logger = get_logger(__name__)
 
 app = FastAPI()
 
@@ -75,30 +79,45 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     events = json.loads(body).get("events", [])
 
     for event in events:
+        # trace_id: LINE の message.id があればそれを使い、無ければ採番。
+        # これで「1回のユーザー発話」の全ログ行を trace_id で串刺しに追える。
+        trace_id = event.get("message", {}).get("id") or uuid.uuid4().hex[:12]
+        trace_id_var.set(trace_id)
+
         if event.get("type") != "message":
+            logger.info(f"webhook: skip non-message event type={event.get('type')}")
             continue
         if event.get("message", {}).get("type") != "text":
+            logger.info(f"webhook: skip non-text message type={event.get('message', {}).get('type')}")
             continue
 
         user_id      = event["source"]["userId"]
         user_message = event["message"]["text"]
+        user_id_var.set(user_id)
+
+        logger.info(f"webhook: event received user={user_id[:8]}... msg={user_message!r}")
 
         # 重い処理はバックグラウンドへ。webhook 自体は即 200 を返す。
-        background_tasks.add_task(_handle_message, user_id, user_message)
+        background_tasks.add_task(_handle_message, user_id, user_message, trace_id)
 
     return {"status": "ok"}
 
 
-async def _handle_message(user_id: str, user_message: str):
+async def _handle_message(user_id: str, user_message: str, trace_id: str):
     """ADK 本体処理を実行する。
     ブラックリスト判定・利用ログ記録は GAS 受付係側で完結しているため、
     Cloud Run まで届いた時点でそのユーザーはホワイト扱い・ログ記録済み。
     """
-    print(f"[DEBUG] _handle_message start: user={user_id[:8]}... msg={user_message!r}")
+    # BackgroundTasks は別タスクとして実行される場合があるため、
+    # ここで改めて ContextVar をセットして trace_id/user_id を確実に引き継ぐ。
+    trace_id_var.set(trace_id)
+    user_id_var.set(user_id)
+
+    logger.info(f"_handle_message start: user={user_id[:8]}... msg={user_message!r}")
 
     # --- ADK 本体処理 ---
     await _process_message(user_id, user_message)
-    print("[DEBUG] _handle_message end")
+    logger.info("_handle_message end")
 
 
 def _extract_text(chunk) -> str:
@@ -148,10 +167,10 @@ async def _process_message(user_id: str, user_message: str):
                     user_id=user_id,
                     session_id=session_id,
                 )
-                print(f"[DEBUG] session expired, reset: user={user_id[:8]}...")
+                logger.info(f"session expired, reset: user={user_id[:8]}...")
             except Exception as e:
                 # 既に存在しない場合などは無視
-                print(f"[DEBUG] session delete skipped: {e}")
+                logger.info(f"session delete skipped: {e}")
 
         session = await SESSION_SERVICE.get_session(
             app_name="landscape-photo-agent",
@@ -196,8 +215,8 @@ async def _process_message(user_id: str, user_message: str):
             #    ループを回し切り、最後に観測した final テキストを採用する。
 
         reply_text = last_final_text or output_key_text
-        print(
-            f"[DEBUG] run done: chunks={chunk_count} "
+        logger.info(
+            f"run done: chunks={chunk_count} "
             f"final_len={len(last_final_text)} okey_len={len(output_key_text)} "
             f"reply_len={len(reply_text)}"
         )
@@ -205,12 +224,14 @@ async def _process_message(user_id: str, user_message: str):
         if reply_text:
             await push_message(user_id, reply_text)
         else:
-            print("[WARN] reply_text is empty, sending fallback message")
+            logger.warning("reply_text is empty, sending fallback message")
             await push_message(
                 user_id,
                 "⚠️ 応答を取得できませんでした。もう一度お試しください。",
             )
 
-    except Exception as e:
-        print(f"Error processing message for {user_id}: {e}")
+    except Exception:
+        # スタックトレースまで残さないと「どのエージェント/ツールで何が起きたか」が
+        # 追えず原因切り分けができないため、logger.exception でフルトレースを記録する。
+        logger.exception(f"process_message failed for user={user_id[:8]}...")
         await push_message(user_id, "⚠️ エラーが発生しました。もう一度お試しください。")
