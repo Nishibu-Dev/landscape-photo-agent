@@ -26,6 +26,10 @@
 import json
 import httpx
 
+from tools.logger import get_logger
+
+logger = get_logger(__name__)
+
 DRIVE_API_BASE = "https://www.googleapis.com/drive/v3"
 DRIVE_UPLOAD_BASE = "https://www.googleapis.com/upload/drive/v3"
 
@@ -73,6 +77,9 @@ async def append_to_json_list(file_id: str, new_item: dict) -> None:
     try:
         data = await read_json(file_id)
     except Exception:
+        # ここでログを残さないと、Drive 側の読み込み失敗(認証切れ・ファイルID不正等)で
+        # 気づかぬまま新規リストとして上書き保存してしまうリスクに気づけない。
+        logger.exception(f"append_to_json_list: read_json failed file_id={file_id}, starting with empty list")
         data = []
 
     if isinstance(data, list):
@@ -82,7 +89,7 @@ async def append_to_json_list(file_id: str, new_item: dict) -> None:
 
     # ラッパー形式（predictions / actuals）への追記
     if isinstance(data, dict):
-        for key in ("predictions", "actuals"):
+        for key in ("predictions", "actuals", "fog_knowledge"):
             if key in data and isinstance(data[key], list):
                 data[key].append(new_item)
                 await write_json(file_id, data)
@@ -108,6 +115,7 @@ async def find_latest_prediction_id(
     try:
         data = await read_json(file_id)
     except Exception:
+        logger.exception(f"find_latest_prediction_id: read_json failed file_id={file_id} spot={spot_name}")
         return None
 
     if isinstance(data, dict):

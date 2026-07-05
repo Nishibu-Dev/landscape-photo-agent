@@ -3,6 +3,9 @@ import os
 import httpx
 from datetime import datetime, timezone, timedelta
 from config.adjustments import get_wind_factor
+from tools.logger import get_logger
+
+logger = get_logger(__name__)
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
@@ -39,6 +42,7 @@ async def _resolve_elev(spot_name: str, lat: float, lng: float) -> int | None:
         from tools.location import _fetch_elevation
         return await _fetch_elevation(lat, lng)
     except Exception:
+        logger.warning(f"_resolve_elev fallback failed spot={spot_name} lat={lat} lng={lng}", exc_info=True)
         return None
 
 
@@ -159,6 +163,9 @@ async def fetch_all_forecasts(user_input: str) -> list[dict]:
                 save_snapshot=False,
             )
         except Exception as e:
+            # ここが無ログだと「おすすめ地点の気象データを取得できません」の
+            # 実際の原因(Open-Meteo タイムアウト/5xx等)が一切残らないため、必ず記録する。
+            logger.exception(f"fetch_forecast failed in fetch_all_forecasts spot={spot['name']}")
             return {"spot_name": spot["name"], "error": str(e)}
 
     results = await asyncio.gather(*[_fetch_one(s) for s in spots])
@@ -211,16 +218,19 @@ async def fetch_historical_weather(
         try:
             hourly = await _fetch_hourly_forecast_pastdays(lat, lng, days_ago + 2)
         except Exception:
+            logger.warning(f"fetch_hourly_forecast_pastdays failed spot={spot_name} days_ago={days_ago}", exc_info=True)
             hourly = None
     # 取得できない/古い日付は archive にフォールバック
     if hourly is None:
         try:
             hourly = await _fetch_hourly_archive(lat, lng, eve_date, obs)
         except Exception:
+            logger.warning(f"fetch_hourly_archive failed spot={spot_name} eve_date={eve_date} obs={obs}", exc_info=True)
             hourly = None
 
     if hourly is None:
-        return {"time_range": TIME_RANGE_LABEL, "hourly_actual": []}
+        logger.warning(f"fetch_historical_weather: no data available spot={spot_name} observation_date={observation_date}")
+        return {"time_range": TIME_RANGE_LABEL, "hourly_actual": [], "prev_day_precip_mm": 0.0}
 
     times = hourly["time"]
     result = []
@@ -240,7 +250,14 @@ async def fetch_historical_weather(
                 "cloud_high": hourly["cloud_cover_high"][i],
             })
 
-    return {"time_range": TIME_RANGE_LABEL, "hourly_actual": result}
+    # 前夜(=前日)0〜20時の降水量合計。分析エージェントが「前日雨」として集計に使う。
+    prev_day_precip = _sum_prev_day_precip(hourly, eve_date.isoformat())
+
+    return {
+        "time_range": TIME_RANGE_LABEL,
+        "hourly_actual": result,
+        "prev_day_precip_mm": prev_day_precip,
+    }
 
 
 async def _fetch_hourly_forecast_pastdays(lat: float, lng: float, past_days: int) -> dict:
@@ -250,7 +267,7 @@ async def _fetch_hourly_forecast_pastdays(lat: float, lng: float, past_days: int
         "hourly": (
             "temperature_2m,relative_humidity_2m,dew_point_2m,"
             "cloud_cover_low,cloud_cover_mid,cloud_cover_high,"
-            "wind_speed_10m"
+            "wind_speed_10m,precipitation"
         ),
         "timezone": "Asia/Tokyo",
         "past_days": min(past_days, 92),
@@ -273,7 +290,7 @@ async def _fetch_hourly_archive(lat: float, lng: float, start_date, end_date) ->
         "hourly": (
             "temperature_2m,relative_humidity_2m,dew_point_2m,"
             "cloud_cover_low,cloud_cover_mid,cloud_cover_high,"
-            "wind_speed_10m"
+            "wind_speed_10m,precipitation"
         ),
         "timezone": "Asia/Tokyo",
     }
@@ -349,8 +366,8 @@ async def _build_prediction_record(forecast_result: dict) -> dict | None:
             tags = info.get("tags", []) or []
             pattern = info.get("pattern") or ""
             phenomena_priority = info.get("phenomena_priority", {}) or {}
-    except Exception as e:
-        print(f"[WARN] classify_spot_group failed for {spot_name}: {e}")
+    except Exception:
+        logger.warning(f"classify_spot_group failed for {spot_name}", exc_info=True)
 
     return {
         "id": f"pred_{now.strftime('%Y%m%d%H%M%S%f')}_{spot_name}",
@@ -390,8 +407,8 @@ async def _save_prediction_snapshot(forecast_result: dict) -> None:
     from tools.storage import append_to_json_list  # 遅延import(循環回避)
     try:
         await append_to_json_list(PREDICTIONS_FILE_ID, record)
-    except Exception as e:
-        print(f"[WARN] save_prediction_snapshot failed for {record['spot_name']}: {e}")
+    except Exception:
+        logger.warning(f"save_prediction_snapshot failed for {record['spot_name']}", exc_info=True)
 
 
 async def _save_prediction_snapshots_bulk(forecast_results: list[dict]) -> None:
@@ -433,5 +450,5 @@ async def _save_prediction_snapshots_bulk(forecast_results: list[dict]) -> None:
             data = {"predictions": records}
 
         await write_json(PREDICTIONS_FILE_ID, data)
-    except Exception as e:
-        print(f"[WARN] save_prediction_snapshots_bulk failed ({len(records)}件): {e}")
+    except Exception:
+        logger.warning(f"save_prediction_snapshots_bulk failed ({len(records)}件)", exc_info=True)

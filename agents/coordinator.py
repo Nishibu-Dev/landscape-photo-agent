@@ -5,6 +5,7 @@ from google.adk.planners import BuiltInPlanner
 from google.genai import types
 from agents.forecast import forecast_agent
 from agents.record import record_agent
+from agents.analysis import analysis_agent
 
 COORDINATOR_INSTRUCTION = """
 あなたは風景写真家向けの撮影コンシェルジュです。
@@ -25,6 +26,13 @@ COORDINATOR_INSTRUCTION = """
 - 実績・結果・報告を入力しようとしている
 - 「霧氷あり」「霧なし」「撮れた」「ダメだった」など結果報告のトーン
 - 「記録」「登録」「保存」などのキーワード
+
+■ AnalysisAgent に委譲するケース
+以下のいずれかに該当する場合:
+- 過去の実績データをもとにした「傾向」「分析」「比較」を尋ねている
+  （例:「田ノ原の霧の傾向を教えて」「夜間分析して」「霧が出た夜と出なかった夜を比較して」）
+- ユーザーが見つけた霧のパターンを「ノウハウとして記録」「覚えておいて」「知見として保存」
+  してほしいという依頼（単なる撮影結果の報告ではなく、傾向・知見の言語化であること）
 
 ■ 自分で回答するケース（委譲不要）
 上記の予測・記録のいずれにも該当しないメッセージは、すべて自分で回答すること。
@@ -62,7 +70,7 @@ photo_concierge = LlmAgent(
     model="gemini-2.5-flash",
     description="ユーザーの意図を判定し、予測・記録・案内の適切な処理に振り分けるコーディネーター。",
     instruction=COORDINATOR_INSTRUCTION,
-    sub_agents=[forecast_agent, record_agent],
+    sub_agents=[forecast_agent, record_agent, analysis_agent],
     # 「こんばんは」のような短い入力でも 2.5-flash の内部思考に時間がかかり
     # 1 分超のレイテンシが出ていたため、思考時間を抑制する。
     # ルーティング判定は instruction で明示しており深い思考は不要なので
