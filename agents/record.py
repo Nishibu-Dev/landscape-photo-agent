@@ -1,6 +1,7 @@
 # RecordAgent: 撮影実績を入力・保存するエージェント
 
 import os
+import re
 from datetime import datetime, timezone, timedelta
 from google.adk.agents import LlmAgent
 from google.adk.tools import FunctionTool
@@ -16,10 +17,49 @@ logger = get_logger(__name__)
 ACTUALS_FILE_ID = os.environ.get("ACTUALS_FILE_ID", "")
 PREDICTIONS_FILE_ID = os.environ.get("PREDICTIONS_FILE_ID", "")
 
+_WEEKDAY_MAP = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
+
+
+class DateResolutionError(ValueError):
+    """日付表現を解釈できなかった場合に送出する。"""
+
 
 def _today_jst() -> str:
     jst = timezone(timedelta(hours=9))
     return datetime.now(jst).strftime("%Y-%m-%d")
+
+
+def _resolve_weekday(date_input: str, today):
+    """「先週金曜日」「今週月曜」「金曜日」等の曜日表現を解決する。該当しなければ None。"""
+    m = re.fullmatch(r"(今週|先週|来週)?([月火水木金土日])曜(日)?", date_input)
+    if not m:
+        return None
+    prefix, wd_char = m.group(1), m.group(2)
+    target_wd = _WEEKDAY_MAP[wd_char]
+    today_wd = today.weekday()
+
+    if prefix == "今週":
+        offset = target_wd - today_wd
+    elif prefix == "先週":
+        offset = target_wd - today_wd - 7
+    elif prefix == "来週":
+        offset = target_wd - today_wd + 7
+    else:
+        # 週の指定なし: 直近の過去（当日含む）の該当曜日とみなす
+        offset = -((today_wd - target_wd) % 7)
+
+    return today + timedelta(days=offset)
+
+
+def _resolve_relative_offset(date_input: str, today):
+    """「N日前」「N週間前」を解決する。該当しなければ None。"""
+    m = re.fullmatch(r"(\d+)日前", date_input)
+    if m:
+        return today - timedelta(days=int(m.group(1)))
+    m = re.fullmatch(r"(\d+)週間前", date_input)
+    if m:
+        return today - timedelta(weeks=int(m.group(1)))
+    return None
 
 
 def _resolve_date(date_input: str) -> str:
@@ -39,6 +79,14 @@ def _resolve_date(date_input: str) -> str:
     except ValueError:
         pass
 
+    weekday_date = _resolve_weekday(date_input, today)
+    if weekday_date is not None:
+        return weekday_date.strftime("%Y-%m-%d")
+
+    offset_date = _resolve_relative_offset(date_input, today)
+    if offset_date is not None:
+        return offset_date.strftime("%Y-%m-%d")
+
     norm = date_input.replace("/", "-")
     try:
         parts = norm.split("-")
@@ -48,7 +96,9 @@ def _resolve_date(date_input: str) -> str:
             candidate = datetime(today.year - 1, month, day).date()
         return candidate.strftime("%Y-%m-%d")
     except (ValueError, IndexError):
-        return today.strftime("%Y-%m-%d")
+        raise DateResolutionError(
+            f"日付表現「{date_input}」を解釈できませんでした。ユーザーに具体的な日付（例: YYYY-MM-DD）を確認してください。"
+        )
 
 
 def _norm_state(value: str) -> str:
@@ -200,6 +250,10 @@ spot_nameは戦場ヶ原、rime_iceはあり、その他は不明、noteは空�
 「5/10の田ノ原、放射霧あり、雲海なし」
 spot_nameは田ノ原湿原、radiation_fogはあり、unkaiはなし、rime_iceは不明、
 fogは不明、lightは不明、noteは空文字、dateは"5/10"
+
+「先週金曜日の大阿原湿原は晴れていて霧が出ていたので光芒になった」
+spot_nameは大阿原湿原、fogはあり、lightはあり、noteは空文字、dateは"先週金曜日"
+（"先週金曜日"のような曜日表現もそのままの文字列で渡すこと。今日の日付にしてはならない）
 
 【保存後の返答】
 save_actual ツールの戻り値（saved の中身）をもとに、実際の値に置き換えて
