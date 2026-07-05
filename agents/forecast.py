@@ -58,7 +58,7 @@ async def save_prediction(
     """
     now = _jst_now()
     record = {
-        "id": f"pred_{now.strftime('%Y%m%d%H%M%S')}_{spot_name}",
+        "id": f"pred_{now.strftime('%Y%m%d%H%M%S%f')}_{spot_name}",
         "spot_name": spot_name,
         "spot_group": spot_group,
         "target_date": target_date,

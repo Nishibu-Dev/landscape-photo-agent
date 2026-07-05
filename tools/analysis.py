@@ -1,12 +1,16 @@
-# 夜間分析ツール群
+# 予測精度検証ツール群
 #
 # 役割:
-#   - analyze_fog_patterns: actuals.json を「霧あり/霧なし」で分け、
-#     夜間(0時〜6時)の湿度・T-Td・風速・下層/中層/上層雲・前日降水量を
-#     比較できるレポートテキストを組み立てる。数値の丸め・集計はすべてここで
-#     決定的に行い、LLM には「そのまま出力する」ことだけを任せる。
-#     ※実績データ(hourly_actual)自体は前夜21時〜翌日6時の10時間分を保持しているが、
-#       分析対象として集計するのは0時〜6時の7時点のみに絞り込む。
+#   - analyze_prediction_accuracy: actuals.json を「霧あり/霧なし」で分け、
+#     それぞれの夜に紐づく predictions.json の予測値(夜間0時〜6時の
+#     湿度・T-Td・風速・下層/中層/上層雲・前日降水量)を比較できる
+#     レポートテキストを組み立てる。実測値ではなく、あくまで「予測時点で
+#     どんな値が出ていたか」を霧あり/霧なしで比較するのが目的
+#     （＝次回以降の予測ルール調整の材料にする）。
+#     数値の丸め・集計はすべてここで決定的に行い、LLMには
+#     「そのまま出力する」ことだけを任せる。
+#     ※predictions.json の hourly 自体は前夜21時〜翌日6時の10時間分を
+#       保持しているが、分析対象として集計するのは0時〜6時の7時点のみ。
 #   - save_fog_knowledge / load_fog_knowledge: 利用者が見つけた霧のパターンを
 #     地点別にノウハウとして fog_knowledge.json に蓄積・参照する。
 #
@@ -14,6 +18,9 @@
 #   分析対象は「地点名で絞り込み + 全期間」(絞り込みなしで蓄積された実績を全部見る)。
 #   霧あり/霧なしの判定は observations.radiation_fog を基準にする
 #   （あり・少しあり → 霧あり、なし → 霧なし、不明 → 分析から除外）。
+#   実績記録(save_actual)時に紐づけられた linked_prediction_id で
+#   predictions.json の該当予測を引く。予測ログが見つからない実績は
+#   比較対象外として除外する。
 
 import os
 from datetime import datetime, timezone, timedelta
@@ -25,6 +32,7 @@ from tools.logger import get_logger
 logger = get_logger(__name__)
 
 ACTUALS_FILE_ID = os.environ.get("ACTUALS_FILE_ID", "")
+PREDICTIONS_FILE_ID = os.environ.get("PREDICTIONS_FILE_ID", "")
 FOG_KNOWLEDGE_FILE_ID = os.environ.get("FOG_KNOWLEDGE_FILE_ID", "")
 
 # 放射霧の共通4条件(地形パターンA〜Eは加味しない、全地点共通の閾値)
@@ -76,7 +84,7 @@ async def _load_actuals(spot_name: str) -> list[dict]:
     try:
         data = await read_json(ACTUALS_FILE_ID)
     except Exception:
-        logger.exception(f"analyze_fog_patterns: actuals.json 読み込み失敗 spot={spot_name}")
+        logger.exception(f"analyze_prediction_accuracy: actuals.json 読み込み失敗 spot={spot_name}")
         return []
 
     if isinstance(data, dict):
@@ -92,13 +100,28 @@ async def _load_actuals(spot_name: str) -> list[dict]:
     ]
 
 
-def _fmt_stat(values: list[float], ndigits: int = 0) -> str:
-    avg = round(sum(values) / len(values), ndigits)
-    mn = round(min(values), ndigits)
-    mx = round(max(values), ndigits)
-    if ndigits == 0:
-        avg, mn, mx = int(avg), int(mn), int(mx)
-    return f"avg:{avg} min:{mn} max:{mx}"
+async def _load_predictions_by_id(spot_name: str) -> dict[str, dict]:
+    """predictions.json から指定地点ぶんを id をキーにした dict で返す。"""
+    if not PREDICTIONS_FILE_ID:
+        return {}
+    try:
+        data = await read_json(PREDICTIONS_FILE_ID)
+    except Exception:
+        logger.exception(f"analyze_prediction_accuracy: predictions.json 読み込み失敗 spot={spot_name}")
+        return {}
+
+    if isinstance(data, dict):
+        records = data.get("predictions", [])
+    elif isinstance(data, list):
+        records = data
+    else:
+        records = []
+
+    return {
+        r["id"]: r
+        for r in records
+        if isinstance(r, dict) and r.get("spot_name") == spot_name and r.get("id")
+    }
 
 
 NIGHT_ANALYSIS_HOURS = set(range(0, 7))  # 分析対象は0時〜6時の7時点
@@ -114,14 +137,21 @@ def _in_night_analysis_window(hour_entry: dict) -> bool:
 
 
 class _NightRecord:
-    def __init__(self, record: dict):
-        self.date_disp = _mmdd(record.get("observation_date", ""))
-        self.fog_status = _classify_fog(record.get("observations", {}) or {})
-        hw = record.get("historical_weather", {}) or {}
-        all_hourly = hw.get("hourly_actual", []) or []
+    """1回の実績記録につき、その夜に紐づく「予測値」を保持する。
+
+    グループ分け(霧あり/霧なし)は実績(observations)の霧判定で行うが、
+    集計する数値そのものは実測値ではなく predictions.json の予測値を使う。
+    """
+
+    def __init__(self, actual_record: dict, prediction: dict | None):
+        self.date_disp = _mmdd(actual_record.get("observation_date", ""))
+        self.fog_status = _classify_fog(actual_record.get("observations", {}) or {})
+        self.memo = (actual_record.get("memo") or "").strip()
+
+        weather_data = (prediction or {}).get("weather_data", {}) or {}
+        all_hourly = weather_data.get("hourly", []) or []
         self.hourly = [h for h in all_hourly if _in_night_analysis_window(h)]
-        self.prev_day_precip = hw.get("prev_day_precip_mm", 0.0)
-        self.memo = (record.get("memo") or "").strip()
+        self.prev_day_precip = weather_data.get("prev_day_precip_mm", 0.0)
 
     @property
     def valid(self) -> bool:
@@ -137,7 +167,7 @@ class _NightRecord:
 
     @property
     def wind_list(self) -> list[float]:
-        return [h["wind"] for h in self.hourly]
+        return [h["wind_adjusted"] for h in self.hourly]
 
     @property
     def cloud_low_list(self) -> list[float]:
@@ -166,13 +196,22 @@ def _sort_desc(nights: list[_NightRecord]) -> list[_NightRecord]:
     return sorted(nights, key=lambda n: n.date_disp, reverse=True)
 
 
+def _fmt_stat(values: list[float], ndigits: int = 0) -> str:
+    avg = round(sum(values) / len(values), ndigits)
+    mn = round(min(values), ndigits)
+    mx = round(max(values), ndigits)
+    if ndigits == 0:
+        avg, mn, mx = int(avg), int(mn), int(mx)
+    return f"avg:{avg} min:{mn} max:{mx}"
+
+
 def _build_report(spot_name: str, nights: list[_NightRecord], knowledge_lines: list[str]) -> str:
     fog_nights = _sort_desc([n for n in nights if n.fog_status == "霧あり"])
     nofog_nights = _sort_desc([n for n in nights if n.fog_status == "霧なし"])
 
     lines = []
-    lines.append(f"■{spot_name} 夜間分析")
-    lines.append("【サマリー：夜間(0-6時)の条件達成時間 ※最大7h】")
+    lines.append(f"■{spot_name} 予測精度検証（予測値ベース）")
+    lines.append("【サマリー：夜間(0-6時)の条件達成時間 ※最大7h／予測値ベース】")
     lines.append("条件: 湿度≥90% / T-Td≤2℃ / 風速≤2m/s / 下層雲≤10%")
     lines.append("※地形特性(パターンA〜E等)は加味せず、全地点共通の条件で判定しています")
     lines.append("")
@@ -228,15 +267,19 @@ def _build_report(spot_name: str, nights: list[_NightRecord], knowledge_lines: l
     return "\n".join(lines)
 
 
-async def analyze_fog_patterns(spot_name: str) -> dict:
+async def analyze_prediction_accuracy(spot_name: str) -> dict:
     """
-    actuals.json をもとに、指定地点の「霧が発生した夜」と「発生しなかった夜」を比較する
-    夜間分析レポートを作成する。
+    actuals.json をもとに、指定地点の「霧が発生した夜」と「発生しなかった夜」を分け、
+    それぞれの夜に紐づく predictions.json の予測値(夜間0時〜6時)を比較する
+    レポートを作成する。実測値ではなく予測値どうしを霧あり/霧なしで比較することで、
+    次回以降の予測ルール調整の材料にする。
 
     霧あり/霧なしの判定は observations.radiation_fog を基準にする
     （あり・少しあり→霧あり、なし→霧なし、不明は分析から除外）。
     地形特性(パターンA〜E)は加味せず、全地点共通の閾値(湿度≥90%・T-Td≤2℃・
-    風速≤2m/s・下層雲≤10%)で夜間(0時〜6時)の条件達成時間を集計する。
+    風速≤2m/s・下層雲≤10%)で夜間(0時〜6時)の予測値の条件達成時間を集計する。
+    実績に linked_prediction_id が無い、または対応する予測ログが
+    見つからない場合はその実績を分析から除外する。
     対象期間は絞り込まず、記録されている全期間の実績を使う。
 
     Args:
@@ -249,15 +292,30 @@ async def analyze_fog_patterns(spot_name: str) -> dict:
     spots = await resolve_location(spot_name)
     resolved_name = spots[0]["name"] if spots else spot_name
 
-    records = await _load_actuals(resolved_name)
-    nights = [_NightRecord(r) for r in records]
+    actual_records = await _load_actuals(resolved_name)
+    if not actual_records:
+        return {
+            "status": "no_data",
+            "spot_name": resolved_name,
+            "message": f"{resolved_name}の実績記録がまだありません。",
+        }
+
+    predictions_by_id = await _load_predictions_by_id(resolved_name)
+
+    nights = [
+        _NightRecord(r, predictions_by_id.get(r.get("linked_prediction_id")))
+        for r in actual_records
+    ]
     nights = [n for n in nights if n.valid]
 
     if not nights:
         return {
             "status": "no_data",
             "spot_name": resolved_name,
-            "message": f"{resolved_name}の実績記録がまだありません。",
+            "message": (
+                f"{resolved_name}の実績記録はありますが、突き合わせ可能な予測ログが"
+                "見つかりませんでした。"
+            ),
         }
 
     knowledge_lines = await load_fog_knowledge(resolved_name)
@@ -301,7 +359,7 @@ async def load_fog_knowledge(spot_name: str) -> list[str]:
 async def save_fog_knowledge(spot_name: str, note: str) -> dict:
     """
     利用者が見つけた霧のパターンを、地点別のノウハウとして fog_knowledge.json に保存する。
-    以後、その地点の夜間分析(analyze_fog_patterns)のレポート末尾に蓄積ノウハウとして表示される。
+    以後、その地点の予測精度検証(analyze_prediction_accuracy)のレポート末尾に蓄積ノウハウとして表示される。
 
     Args:
         spot_name: 地点名（例: 田ノ原湿原）
