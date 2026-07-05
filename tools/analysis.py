@@ -36,13 +36,28 @@ def _jst_now() -> datetime:
     return datetime.now(timezone(timedelta(hours=9)))
 
 
-def _classify_fog(radiation_fog_state: str) -> str | None:
-    """observations.radiation_fog を 霧あり/霧なし/None(除外) に分類する。"""
+def _classify_fog(observations: dict) -> str | None:
+    """
+    observations から 霧あり/霧なし/None(除外) を判定する。
+
+    radiation_fog を優先し、それが「不明」の場合は fog フィールドにフォールバックする。
+    RecordAgent の仕様上、ユーザーが「放射霧」と明示しない一般的な「霧」の報告は
+    fog フィールドに入り radiation_fog は「不明」のまま残るため、
+    radiation_fog だけを見ると実績のほとんどが分析対象から漏れてしまう。
+    """
+    radiation_fog_state = observations.get("radiation_fog", "不明")
     if radiation_fog_state in ("あり", "少しあり"):
         return "霧あり"
     if radiation_fog_state == "なし":
         return "霧なし"
-    return None  # 不明は分析対象から除外
+
+    fog_state = observations.get("fog", "不明")
+    if fog_state in ("あり", "少しあり"):
+        return "霧あり"
+    if fog_state == "なし":
+        return "霧なし"
+
+    return None  # 両方とも不明の場合のみ分析対象から除外
 
 
 def _mmdd(observation_date: str) -> str:
@@ -87,9 +102,7 @@ def _fmt_stat(values: list[float], ndigits: int = 0) -> str:
 class _NightRecord:
     def __init__(self, record: dict):
         self.date_disp = _mmdd(record.get("observation_date", ""))
-        self.fog_status = _classify_fog(
-            record.get("observations", {}).get("radiation_fog", "不明")
-        )
+        self.fog_status = _classify_fog(record.get("observations", {}) or {})
         hw = record.get("historical_weather", {}) or {}
         self.hourly = hw.get("hourly_actual", []) or []
         self.prev_day_precip = hw.get("prev_day_precip_mm", 0.0)
