@@ -210,10 +210,10 @@ def _build_report(spot_name: str, nights: list[_NightRecord], knowledge_lines: l
     nofog_nights = _sort_desc([n for n in nights if n.fog_status == "霧なし"])
 
     lines = []
-    lines.append(f"■{spot_name} 予測精度検証（予測値ベース）")
-    lines.append("【サマリー：夜間(0-6時)の条件達成時間 ※最大7h／予測値ベース】")
+    lines.append(f"■{spot_name} 予報値との比較分析")
+    lines.append("【サマリー：夜間(0-6時)の条件達成時間】")
     lines.append("条件: 湿度≥90% / T-Td≤2℃ / 風速≤2m/s / 下層雲≤10%")
-    lines.append("※地形特性(パターンA〜E等)は加味せず、全地点共通の条件で判定しています")
+    lines.append("※地形特性(パターンA〜E等)は加味せず、全地点共通で判定しています")
     lines.append("")
     lines.append("霧あり")
     if fog_nights:
