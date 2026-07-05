@@ -2,9 +2,11 @@
 #
 # 役割:
 #   - analyze_fog_patterns: actuals.json を「霧あり/霧なし」で分け、
-#     夜間(前夜21時〜翌日6時)の湿度・T-Td・風速・下層/中層/上層雲・前日降水量を
+#     夜間(0時〜6時)の湿度・T-Td・風速・下層/中層/上層雲・前日降水量を
 #     比較できるレポートテキストを組み立てる。数値の丸め・集計はすべてここで
 #     決定的に行い、LLM には「そのまま出力する」ことだけを任せる。
+#     ※実績データ(hourly_actual)自体は前夜21時〜翌日6時の10時間分を保持しているが、
+#       分析対象として集計するのは0時〜6時の7時点のみに絞り込む。
 #   - save_fog_knowledge / load_fog_knowledge: 利用者が見つけた霧のパターンを
 #     地点別にノウハウとして fog_knowledge.json に蓄積・参照する。
 #
@@ -99,12 +101,25 @@ def _fmt_stat(values: list[float], ndigits: int = 0) -> str:
     return f"avg:{avg} min:{mn} max:{mx}"
 
 
+NIGHT_ANALYSIS_HOURS = set(range(0, 7))  # 分析対象は0時〜6時の7時点
+
+
+def _in_night_analysis_window(hour_entry: dict) -> bool:
+    time_str = hour_entry.get("time", "")
+    try:
+        hour = int(time_str[11:13])
+    except (ValueError, IndexError):
+        return False
+    return hour in NIGHT_ANALYSIS_HOURS
+
+
 class _NightRecord:
     def __init__(self, record: dict):
         self.date_disp = _mmdd(record.get("observation_date", ""))
         self.fog_status = _classify_fog(record.get("observations", {}) or {})
         hw = record.get("historical_weather", {}) or {}
-        self.hourly = hw.get("hourly_actual", []) or []
+        all_hourly = hw.get("hourly_actual", []) or []
+        self.hourly = [h for h in all_hourly if _in_night_analysis_window(h)]
         self.prev_day_precip = hw.get("prev_day_precip_mm", 0.0)
         self.memo = (record.get("memo") or "").strip()
 
@@ -142,9 +157,8 @@ class _NightRecord:
         h_wind = sum(1 for v in self.wind_list if v <= WIND_THRESHOLD)
         h_cloud = sum(1 for v in self.cloud_low_list if v <= CLOUD_LOW_THRESHOLD)
         return (
-            f"{self.date_disp} {self.fog_status} "
-            f"湿度≥90%:{h_hum}h T-Td≤2℃:{h_ttd}h 風速≤2m/s:{h_wind}h "
-            f"下層雲≤10%:{h_cloud}h 前日雨:{round(self.prev_day_precip, 1)}mm"
+            f"{self.date_disp}  湿度：{h_hum}h T-Td：{h_ttd}h "
+            f"風速：{h_wind}h 下層雲：{h_cloud}h 前日雨：{round(self.prev_day_precip, 1)}mm"
         )
 
 
@@ -158,10 +172,23 @@ def _build_report(spot_name: str, nights: list[_NightRecord], knowledge_lines: l
 
     lines = []
     lines.append(f"■{spot_name} 夜間分析")
-    lines.append("【サマリー：夜間の条件達成時間】")
+    lines.append("【サマリー：夜間(0-6時)の条件達成時間 ※最大7h】")
+    lines.append("条件: 湿度≥90% / T-Td≤2℃ / 風速≤2m/s / 下層雲≤10%")
     lines.append("※地形特性(パターンA〜E等)は加味せず、全地点共通の条件で判定しています")
-    for n in fog_nights + nofog_nights:
-        lines.append(n.summary_line())
+    lines.append("")
+    lines.append("霧あり")
+    if fog_nights:
+        for n in fog_nights:
+            lines.append(n.summary_line())
+    else:
+        lines.append("（該当なし）")
+    lines.append("")
+    lines.append("霧なし")
+    if nofog_nights:
+        for n in nofog_nights:
+            lines.append(n.summary_line())
+    else:
+        lines.append("（該当なし）")
 
     def _section(title: str, ndigits: int, getter):
         lines.append("")
@@ -209,7 +236,7 @@ async def analyze_fog_patterns(spot_name: str) -> dict:
     霧あり/霧なしの判定は observations.radiation_fog を基準にする
     （あり・少しあり→霧あり、なし→霧なし、不明は分析から除外）。
     地形特性(パターンA〜E)は加味せず、全地点共通の閾値(湿度≥90%・T-Td≤2℃・
-    風速≤2m/s・下層雲≤10%)で夜間の条件達成時間を集計する。
+    風速≤2m/s・下層雲≤10%)で夜間(0時〜6時)の条件達成時間を集計する。
     対象期間は絞り込まず、記録されている全期間の実績を使う。
 
     Args:
