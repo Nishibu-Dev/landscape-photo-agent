@@ -166,7 +166,9 @@ async def fetch_all_forecasts(user_input: str, target_offset_days: int = 1) -> l
     if not spots:
         return []
 
-    async def _fetch_one(spot: dict) -> dict:
+    async def _fetch_one(spot: dict, delay: float) -> dict:
+        if delay > 0:
+            await asyncio.sleep(delay)
         try:
             return await fetch_forecast(
                 lat=spot["lat"],
@@ -179,7 +181,10 @@ async def fetch_all_forecasts(user_input: str, target_offset_days: int = 1) -> l
             logger.exception(f"fetch_forecast failed in fetch_all_forecasts spot={spot['name']}")
             return {"spot_name": spot["name"], "error": str(e)}
 
-    results = await asyncio.gather(*[_fetch_one(s) for s in spots])
+    # Open-Meteo のレート制限回避のため、各リクエストに0.3秒ずつずらして発行
+    results = await asyncio.gather(*[
+        _fetch_one(s, i * 0.3) for i, s in enumerate(spots)
+    ])
     results = list(results)
 
     # 翌日予測のみ predictions.json に保存（翌々日は精度検証対象外）
