@@ -1,0 +1,12 @@
+steps:
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'landscape-photo-agent'
+      - '--source=.'
+      - '--region=asia-northeast1'
+      - '--no-cpu-throttling'
+      - '--min-instances=1'
+timeout: '1200s'
