@@ -63,13 +63,17 @@ def _build_target_times(base_date_str: str) -> list[str]:
 
 
 async def fetch_forecast(lat: float, lng: float, spot_name: str,
-                         save_snapshot: bool = True) -> dict:
+                         save_snapshot: bool = True,
+                         target_offset_days: int = 1) -> dict:
     """
-    翌朝の撮影コンディション予測のため、前夜21時〜翌日6時の予報を取得する。
+    撮影コンディション予測のため、対象朝の前夜21時〜翌日6時の予報を取得する。
 
+    Args:
+        target_offset_days: 何日後の朝を対象とするか。1=翌朝(デフォルト)、2=翌々朝。
     save_snapshot=True のとき、取得結果を predictions.json に即保存する。
     「おすすめ」一括(fetch_all_forecasts)では並列書き込みの競合を避けるため
     False で呼び、呼び出し側が最後にまとめて1回だけ保存する。
+    翌々日予測(target_offset_days=2)では精度検証対象外のため保存しない。
     """
     params = {
         "latitude": lat,
@@ -95,9 +99,9 @@ async def fetch_forecast(lat: float, lng: float, spot_name: str,
     factor = get_wind_factor(spot_name)
 
     now_jst = _jst_now()
-    # 「今夜21時〜明朝6時」を対象に。base_date は今日。
-    today_str = now_jst.strftime("%Y-%m-%d")
-    target_times = _build_target_times(today_str)
+    # base_date: offset=1 なら今日(今夜21時〜明朝6時)、offset=2 なら明日(明夜21時〜明後朝6時)
+    base_date = (now_jst + timedelta(days=target_offset_days - 1)).strftime("%Y-%m-%d")
+    target_times = _build_target_times(base_date)
 
     result_hourly = []
     times = hourly["time"]
@@ -117,18 +121,19 @@ async def fetch_forecast(lat: float, lng: float, spot_name: str,
                 "cloud_high":    hourly["cloud_cover_high"][i],
             })
 
-    # パターンC「前日雨リセット」判定用に、対象前日(今日0〜20時)の降水量合計を算出。
+    # パターンC「前日雨リセット」判定用に、対象前日(base_date当日0〜20時)の降水量合計を算出。
     # ForecastAgent はこの値を見て、乾燥湿原の閾値を緩めるか判断する。
-    prev_day_precip = _sum_prev_day_precip(hourly, today_str)
+    prev_day_precip = _sum_prev_day_precip(hourly, base_date)
 
     summary = _build_summary(spot_name, factor, result_hourly, prev_day_precip)
 
     elev = await _resolve_elev(spot_name, lat, lng)
 
+    target_date_str = (now_jst + timedelta(days=target_offset_days)).strftime("%Y-%m-%d")
     result = {
         "spot_name":  spot_name,
         "elev":       elev,
-        "target_date": (now_jst + timedelta(days=1)).strftime("%Y-%m-%d"),
+        "target_date": target_date_str,
         "time_range": TIME_RANGE_LABEL,
         "prev_day_precip_mm": prev_day_precip,  # 前日降水量合計(mm)。パターンC判定用。
         "hourly":     result_hourly,
@@ -140,13 +145,21 @@ async def fetch_forecast(lat: float, lng: float, spot_name: str,
     # 後で実績と突き合わせる際は spot_name + target_date で紐づけられる。
     # ※「おすすめ」一括時は save_snapshot=False で呼ばれ、呼び出し側がまとめ保存する
     #   (並列 read-modify-write による上書き競合を避けるため)。
-    if save_snapshot:
+    # ※ 翌々日予測(offset=2)は精度検証対象外のため保存しない。
+    if save_snapshot and target_offset_days == 1:
         await _save_prediction_snapshot(result)
 
     return result
 
 
-async def fetch_all_forecasts(user_input: str) -> list[dict]:
+async def fetch_all_forecasts(user_input: str, target_offset_days: int = 1) -> list[dict]:
+    """
+    全おすすめ地点の予報を一括取得する。
+
+    Args:
+        user_input: ユーザー入力テキスト（resolve_location に渡す）
+        target_offset_days: 何日後の朝を対象とするか。1=翌朝、2=翌々朝。
+    """
     from tools.location import resolve_location
 
     spots = await resolve_location(user_input)
@@ -155,25 +168,23 @@ async def fetch_all_forecasts(user_input: str) -> list[dict]:
 
     async def _fetch_one(spot: dict) -> dict:
         try:
-            # 並列取得。個別保存はオフ(save_snapshot=False)にして競合を避ける。
             return await fetch_forecast(
                 lat=spot["lat"],
                 lng=spot["lng"],
                 spot_name=spot["name"],
                 save_snapshot=False,
+                target_offset_days=target_offset_days,
             )
         except Exception as e:
-            # ここが無ログだと「おすすめ地点の気象データを取得できません」の
-            # 実際の原因(Open-Meteo タイムアウト/5xx等)が一切残らないため、必ず記録する。
             logger.exception(f"fetch_forecast failed in fetch_all_forecasts spot={spot['name']}")
             return {"spot_name": spot["name"], "error": str(e)}
 
     results = await asyncio.gather(*[_fetch_one(s) for s in spots])
     results = list(results)
 
-    # 全地点ぶんを1回の read-modify-write でまとめて保存する。
-    # これにより並列書き込みの上書き競合(最後の1件だけ残る問題)を回避する。
-    await _save_prediction_snapshots_bulk(results)
+    # 翌日予測のみ predictions.json に保存（翌々日は精度検証対象外）
+    if target_offset_days == 1:
+        await _save_prediction_snapshots_bulk(results)
 
     return results
 
