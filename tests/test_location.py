@@ -1,7 +1,13 @@
 # tests/test_location.py
 # tools/location.py の純粋関数テスト
 
-from tools.location import _sanitize_place_query, _looks_like_place_name
+from tools.location import (
+    _sanitize_place_query,
+    _looks_like_place_name,
+    _is_summer_fog_season,
+    _recommend_spots,
+)
+from config.spots import DEFAULT_SPOTS, SUMMER_RECOMMEND_EXCLUDE
 
 
 # =============================================
@@ -46,3 +52,38 @@ class TestLooksLikePlaceName:
         """依頼語が残っている → まだ文章 → False"""
         assert _looks_like_place_name("予測") is False
         assert _looks_like_place_name("天気") is False
+
+
+# =============================================
+# _is_summer_fog_season / _recommend_spots
+# =============================================
+
+class TestIsSummerFogSeason:
+    def test_summer_months(self):
+        for month in range(5, 11):
+            assert _is_summer_fog_season(month) is True
+
+    def test_winter_months(self):
+        for month in (11, 12, 1, 2, 3, 4):
+            assert _is_summer_fog_season(month) is False
+
+
+class TestRecommendSpots:
+    def test_summer_excludes_configured_spots(self):
+        """夏場(5-10月)は SUMMER_RECOMMEND_EXCLUDE の地点をおすすめから除外する"""
+        names = [s["name"] for s in _recommend_spots(7)]
+        for excluded in SUMMER_RECOMMEND_EXCLUDE:
+            assert excluded not in names
+        assert "カヤの平" in names
+
+    def test_winter_includes_all_default_spots(self):
+        """冬場(11-4月)は DEFAULT_SPOTS 全地点を返す(除外なし)"""
+        names = [s["name"] for s in _recommend_spots(12)]
+        assert len(names) == len(DEFAULT_SPOTS)
+        for excluded in SUMMER_RECOMMEND_EXCLUDE:
+            assert excluded in names
+
+    def test_does_not_mutate_default_spots(self):
+        """DEFAULT_SPOTS 自体は変更されない(個別指定への影響なし)"""
+        _recommend_spots(7)
+        assert len(DEFAULT_SPOTS) == 10
