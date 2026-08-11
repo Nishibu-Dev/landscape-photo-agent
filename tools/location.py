@@ -16,11 +16,33 @@
 import os
 import json
 import httpx
+from datetime import datetime, timezone, timedelta
 
-from config.spots import get_spot_by_name, DEFAULT_SPOTS
+from config.spots import get_spot_by_name, DEFAULT_SPOTS, SUMMER_RECOMMEND_EXCLUDE
 from tools.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _jst_now() -> datetime:
+    return datetime.now(timezone(timedelta(hours=9)))
+
+
+def _is_summer_fog_season(month: int) -> bool:
+    """霧シーズン(5-10月)かどうかを判定する。"""
+    return 5 <= month <= 10
+
+
+def _recommend_spots(month: int) -> list[dict]:
+    """「おすすめ」対象地点を季節に応じて返す。
+
+    夏場(5-10月, 霧シーズン)は SUMMER_RECOMMEND_EXCLUDE の地点を除外する
+    (霧のニーズが低いため)。11-4月(霧氷シーズン)は DEFAULT_SPOTS 全地点を返す。
+    DEFAULT_SPOTS 自体からは除外しないため、個別指定の予測には影響しない。
+    """
+    if _is_summer_fog_season(month):
+        return [s for s in DEFAULT_SPOTS if s["name"] not in SUMMER_RECOMMEND_EXCLUDE]
+    return list(DEFAULT_SPOTS)
 
 # spot_groups.json の Drive ファイルID。未設定ならキャッシュ機能は無効化(座標解決は動く)。
 SPOT_GROUPS_FILE_ID = os.environ.get("SPOT_GROUPS_FILE_ID", "")
@@ -34,7 +56,8 @@ async def resolve_location(user_input: str) -> list[dict]:
     """
     ユーザー入力から対象地点リストを返す。
 
-    - 「おすすめ」を含む → DEFAULT_SPOTS 全10地点
+    - 「おすすめ」を含む → DEFAULT_SPOTS のうち季節に応じた対象地点
+      (夏場は SUMMER_RECOMMEND_EXCLUDE の地点を除く。詳細は _recommend_spots 参照)
     - 登録済み地点名（エイリアス含む）→ 該当の1地点
     - 未知の地点名 → Maps API で座標・標高を解決して1地点返す(is_unknown=True)。
       Maps が使えない/見つからない/地点名と判断できない場合は空リスト。
@@ -48,7 +71,7 @@ async def resolve_location(user_input: str) -> list[dict]:
 
     # 「おすすめ」系は部分一致で判定(「おすすめスポットの予測をお願いします」等にも対応)
     if any(kw in text for kw in ("おすすめ", "オススメ", "お勧め", "オススメスポット")):
-        return DEFAULT_SPOTS
+        return _recommend_spots(_jst_now().month)
 
     # 1) 手動シード(登録地点・エイリアス)を最優先(原文のまま)
     spot = get_spot_by_name(text)
