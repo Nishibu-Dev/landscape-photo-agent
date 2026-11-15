@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import os
 import httpx
 from datetime import datetime, timezone, timedelta
@@ -8,6 +9,17 @@ from tools.logger import get_logger
 logger = get_logger(__name__)
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
+
+# jma_seamless: MSMの予報期間内はMSM、期間外(翌々朝など)はGSMで補完される
+_OPEN_METEO_MODEL = "jma_seamless"
+_OPEN_METEO_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+_HOURLY_VARS = (
+    "temperature_2m,relative_humidity_2m,dew_point_2m,"
+    "cloud_cover_low,cloud_cover_mid,cloud_cover_high,"
+    "wind_speed_10m,precipitation"
+)
+# fetch_all_forecasts がまとめ取得したデータを、地点ごとの fetch_forecast に渡す
+_PREFETCHED: contextvars.ContextVar = contextvars.ContextVar("open_meteo_prefetched", default=None)
 
 # 予測スナップショット保存先(predictions.json の Drive ファイルID)。
 # fetch_forecast が気象データ取得時に、ここへ予測ログを即保存する。
@@ -87,13 +99,18 @@ async def fetch_forecast(lat: float, lng: float, spot_name: str,
         # past_days=1 で前日分も取得し、パターンC「前日雨リセット」判定に使う
         "past_days": 1,
         "forecast_days": 3,
-        "models": "jma_msm",
+        "models": _OPEN_METEO_MODEL,
     }
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(OPEN_METEO_URL, params=params)
-        resp.raise_for_status()
-        data = resp.json()
+    data = _PREFETCHED.get()
+    if data is None:
+        async with httpx.AsyncClient(
+            timeout=_OPEN_METEO_TIMEOUT,
+            transport=httpx.AsyncHTTPTransport(retries=2),
+        ) as client:
+            resp = await client.get(OPEN_METEO_URL, params=params)
+            resp.raise_for_status()
+            data = resp.json()
 
     hourly = data["hourly"]
     factor = get_wind_factor(spot_name)
@@ -115,7 +132,7 @@ async def fetch_forecast(lat: float, lng: float, spot_name: str,
                 "dew_point":     hourly["dew_point_2m"][i],
                 "humidity":      hourly["relative_humidity_2m"][i],
                 "wind_raw":      raw_wind,
-                "wind_adjusted": round(raw_wind * factor, 1),
+                "wind_adjusted": round(raw_wind * factor, 1) if raw_wind is not None else None,
                 "cloud_low":     hourly["cloud_cover_low"][i],
                 "cloud_mid":     hourly["cloud_cover_mid"][i],
                 "cloud_high":    hourly["cloud_cover_high"][i],
@@ -152,6 +169,33 @@ async def fetch_forecast(lat: float, lng: float, spot_name: str,
     return result
 
 
+async def _fetch_open_meteo_batch(spots: list[dict]) -> list[dict]:
+    """全地点を1回のリクエストで取得する。
+    Open-Meteoは同一IPからの同時接続を5本程度に絞り、残りを待たせるため、
+    地点ごとに接続するとTLSハンドシェイクでタイムアウトする(2026-11-15に確認)。"""
+    params = {
+        "latitude":  ",".join(str(s["lat"]) for s in spots),
+        "longitude": ",".join(str(s["lng"]) for s in spots),
+        "hourly": _HOURLY_VARS,
+        "timezone": "Asia/Tokyo",
+        "past_days": 1,
+        "forecast_days": 3,
+        "models": _OPEN_METEO_MODEL,
+    }
+    async with httpx.AsyncClient(
+        timeout=_OPEN_METEO_TIMEOUT,
+        transport=httpx.AsyncHTTPTransport(retries=2),
+    ) as client:
+        resp = await client.get(OPEN_METEO_URL, params=params)
+        resp.raise_for_status()
+        data = resp.json()
+    if isinstance(data, dict):  # 1地点のときはリストでなく辞書で返る
+        data = [data]
+    if len(data) != len(spots):
+        raise ValueError(f"Open-Meteo returned {len(data)} results for {len(spots)} spots")
+    return data
+
+
 async def fetch_all_forecasts(user_input: str, target_offset_days: int = 1) -> list[dict]:
     """
     全おすすめ地点の予報を一括取得する。
@@ -181,10 +225,22 @@ async def fetch_all_forecasts(user_input: str, target_offset_days: int = 1) -> l
             logger.exception(f"fetch_forecast failed in fetch_all_forecasts spot={spot['name']}")
             return {"spot_name": spot["name"], "error": str(e)}
 
-    # Open-Meteo のレート制限回避のため、各リクエストに0.3秒ずつずらして発行
-    results = await asyncio.gather(*[
-        _fetch_one(s, i * 0.3) for i, s in enumerate(spots)
-    ])
+    # Open-Meteo へは全地点を1回のリクエストでまとめて取得し、各地点の加工処理に配る
+    try:
+        batch = await _fetch_open_meteo_batch(spots)
+    except Exception as e:
+        logger.exception("Open-Meteo batch fetch failed")
+        batch = None
+        results = [{"spot_name": s["name"], "error": str(e)} for s in spots]
+
+    if batch is not None:
+        async def _fetch_one_with_data(spot: dict, data: dict) -> dict:
+            _PREFETCHED.set(data)  # このタスクの中だけで有効
+            return await _fetch_one(spot, 0)
+
+        results = await asyncio.gather(
+            *[_fetch_one_with_data(s, d) for s, d in zip(spots, batch)]
+        )
     results = list(results)
 
     # 翌日予測のみ predictions.json に保存（翌々日は精度検証対象外）
@@ -342,7 +398,8 @@ def _build_summary(spot_name: str, factor: float, hourly: list,
     # 前日降水はパターンC判定の材料になるため明示
     lines.append(f"[前日降水量(当日0-20時)合計: {prev_day_precip}mm]")
     for h in hourly:
-        t_td = round(h["temp"] - h["dew_point"], 1)
+        t_td = (round(h["temp"] - h["dew_point"], 1)
+                if h["temp"] is not None and h["dew_point"] is not None else None)
         lines.append(
             f"{h['time']}: "
             f"T:{h['temp']}℃, Td:{h['dew_point']}℃, T-Td:{t_td}℃, "
