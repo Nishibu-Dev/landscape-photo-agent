@@ -143,6 +143,12 @@ async def fetch_forecast(lat: float, lng: float, spot_name: str,
     prev_day_precip = _sum_prev_day_precip(hourly, base_date)
 
     summary = _build_summary(spot_name, factor, result_hourly, prev_day_precip)
+    # 上高地は霧氷の特別ルールをPythonで機械判定し、結果を要約の末尾に1行で明示する
+    # (LLMが10時間分の数値から3条件の同時成立を読み落とすのを防ぐため)
+    kamikochi_rime = None
+    if spot_name == KAMIKOCHI_SPOT:
+        kamikochi_rime = check_kamikochi_rime(result_hourly)
+        summary = summary + "\n" + kamikochi_rime["summary_line"]
 
     elev = await _resolve_elev(spot_name, lat, lng)
 
@@ -156,6 +162,8 @@ async def fetch_forecast(lat: float, lng: float, spot_name: str,
         "hourly":     result_hourly,
         "summary":    summary,
     }
+    if kamikochi_rime is not None:
+        result["kamikochi_rime"] = {k: v for k, v in kamikochi_rime.items() if k != "summary_line"}
 
     # 予測スナップショットを predictions.json へ即保存(LLMのsave_prediction呼び出しに依存しない)。
     # 確率テキストはこの時点で未確定のため空で保存し、weather_data(実値)を確実に残す。
@@ -390,6 +398,136 @@ def _sum_prev_day_precip(hourly: dict, target_today_str: str) -> float:
             if hour <= 20 and i < len(precip) and precip[i] is not None:
                 total += precip[i]
     return round(total, 1)
+
+
+# ---------------------------------------------------------------------------
+# 田代湿原(上高地)の霧氷 特別ルール
+#   露点 ≦ -15℃ かつ 下層雲 < 10% かつ 風速(補正後) ≦ 2.5m/s が同じ時刻にそろえば成立。
+#   - 気温は判定に使わない(実績では霧氷あり/なしを分けなかったため。参考表示のみ)
+#   - 下層雲: 強い冷え込みでは湿った空気でも露点が下がるため、
+#     「冷えているだけで湿った(雲のある)夜」を除外する役割
+#   - 風速: 強いと霧氷が飛ばされるため上限を設ける
+#   - 霧氷(樹霜)は時間をかけて育つため、連続時間と明け方(撮影時間帯)の成立も見る
+#   閾値は過去の上高地7夜の実績(霧氷あり/少しあり/なし)を見て決定。
+# ---------------------------------------------------------------------------
+KAMIKOCHI_SPOT = "田代湿原(上高地)"
+KAMIKOCHI_RIME_DEWPOINT_MAX = -15.0   # 露点(℃) これ以下
+KAMIKOCHI_RIME_CLOUD_LOW_MAX = 10.0   # 下層雲(%) これ未満
+KAMIKOCHI_RIME_WIND_MAX = 2.5         # 風速 補正後(m/s) これ以下
+KAMIKOCHI_RIME_LONG_RUN_HOURS = 3     # この時間以上の連続成立で「長時間」
+KAMIKOCHI_RIME_DAWN_HOURS = ("04:00", "05:00", "06:00")  # 明け方(撮影時間帯)
+# 「惜しい」: 1条件だけが、この幅以内で足りない(残り2条件は満たす)
+KAMIKOCHI_NEAR_MISS_MARGIN = {"露点": 2.0, "下層雲": 10.0, "風速": 0.5}
+
+# 判定区分 → (表示名, 確率の目安)。確率の割り当ては ForecastAgent の指示文と一致させること。
+KAMIKOCHI_RIME_GRADES = {
+    "A": ("成立・長時間・明け方まで継続", "85〜95%"),
+    "B": ("成立・長時間だが明け方は不成立", "50〜70%"),
+    "C": ("成立・短時間または途切れ途切れ", "40〜60%"),
+    "D": ("不成立・惜しい", "30〜50%"),
+    "E": ("不成立", "20%以下"),
+}
+
+
+def _kamikochi_gaps(td: float, cl: float, w: float) -> dict:
+    """各条件の不足分(0なら満たしている)。下層雲は「10%未満」なので 10%ちょうどは不足1。"""
+    return {
+        "露点": round(max(0.0, td - KAMIKOCHI_RIME_DEWPOINT_MAX), 1),
+        "下層雲": round(cl - KAMIKOCHI_RIME_CLOUD_LOW_MAX + 1, 1) if cl >= KAMIKOCHI_RIME_CLOUD_LOW_MAX else 0.0,
+        "風速": round(max(0.0, w - KAMIKOCHI_RIME_WIND_MAX), 1),
+    }
+
+
+def _is_next_hour(prev_time: str, time: str) -> bool:
+    fmt = "%Y-%m-%dT%H:%M"
+    return datetime.strptime(time, fmt) - datetime.strptime(prev_time, fmt) == timedelta(hours=1)
+
+
+def check_kamikochi_rime(hourly: list[dict]) -> dict:
+    """
+    上高地の霧氷特別ルールを時間ごとに判定し、A〜E の区分を返す。
+
+    A: 3時間以上連続で成立し、その連続に明け方(4〜6時)を含む
+    B: 3時間以上連続で成立したが、その連続に明け方を含まない
+    C: 成立はしたが、最長連続が3時間未満
+    D: 不成立だが、1条件だけが小さい幅で足りない時刻がある(惜しい)
+    E: 不成立
+
+    Returns:
+        grade, grade_label, probability, met_hours, longest_run, near_miss, summary_line
+    """
+    met_times = []          # 成立した時刻(フォーマット: YYYY-MM-DDTHH:MM)
+    near_miss = None
+    near_miss_score = None
+    has_data = False
+    for h in hourly:
+        td, cl, w = h.get("dew_point"), h.get("cloud_low"), h.get("wind_adjusted")
+        if td is None or cl is None or w is None:
+            continue
+        has_data = True
+        gaps = _kamikochi_gaps(td, cl, w)
+        short = {k: v for k, v in gaps.items() if v > 0}
+        if not short:
+            met_times.append(h["time"])
+            continue
+        if len(short) == 1:
+            (name, gap), = short.items()
+            margin = KAMIKOCHI_NEAR_MISS_MARGIN[name]
+            if gap <= margin:
+                score = gap / margin  # 幅に対する割合で「より惜しい」を比較
+                if near_miss_score is None or score < near_miss_score:
+                    near_miss_score = score
+                    near_miss = {"time": h["time"][11:16], "condition": name, "shortfall": gap,
+                                 "dew_point": td, "cloud_low": cl, "wind_adjusted": w,
+                                 "temp": h.get("temp")}
+
+    # 最長の連続成立区間を求める(欠損や不成立の時刻で途切れる)
+    runs, cur = [], []
+    for t in met_times:
+        if cur and _is_next_hour(cur[-1], t):
+            cur.append(t)
+        else:
+            if cur:
+                runs.append(cur)
+            cur = [t]
+    if cur:
+        runs.append(cur)
+    longest = max(runs, key=len) if runs else []
+    longest_hhmm = [t[11:16] for t in longest]
+    longest_has_dawn = any(t in KAMIKOCHI_RIME_DAWN_HOURS for t in longest_hhmm)
+
+    if longest and len(longest) >= KAMIKOCHI_RIME_LONG_RUN_HOURS:
+        grade = "A" if longest_has_dawn else "B"
+    elif met_times:
+        grade = "C"
+    elif near_miss:
+        grade = "D"
+    else:
+        grade = "E"
+    label, prob = KAMIKOCHI_RIME_GRADES[grade]
+
+    rule = (f"露点≦{KAMIKOCHI_RIME_DEWPOINT_MAX:g}℃・下層雲<{KAMIKOCHI_RIME_CLOUD_LOW_MAX:g}%・"
+            f"風速(補正後)≦{KAMIKOCHI_RIME_WIND_MAX:g}m/s")
+    head = f"【上高地霧氷ルール({rule})】判定{grade}: {label}(霧氷の確率目安 {prob})"
+    if not has_data:
+        line = f"【上高地霧氷ルール({rule})】判定不能(データ欠損)"
+        grade, label, prob = None, "判定不能", None
+    elif met_times:
+        line = (f"{head} / 成立 計{len(met_times)}時間 / 最長連続{len(longest)}時間"
+                f"({longest_hhmm[0]}〜{longest_hhmm[-1]}) / 明け方(4〜6時)の成立"
+                f"{'あり' if longest_has_dawn else 'なし'}")
+    elif near_miss:
+        unit = {"露点": "℃", "下層雲": "%", "風速": "m/s"}[near_miss["condition"]]
+        line = (f"{head} / 最も惜しいのは{near_miss['time']}: {near_miss['condition']}があと"
+                f"{near_miss['shortfall']}{unit}不足 (Td:{near_miss['dew_point']}℃, "
+                f"下層雲:{near_miss['cloud_low']}%, W:{near_miss['wind_adjusted']}m/s, "
+                f"参考T:{near_miss['temp']}℃)")
+    else:
+        line = head
+
+    return {"grade": grade, "grade_label": label, "probability": prob,
+            "met_hours": [t[11:16] for t in met_times],
+            "longest_run": longest_hhmm, "near_miss": near_miss, "summary_line": line}
 
 
 def _build_summary(spot_name: str, factor: float, hourly: list,

@@ -75,3 +75,83 @@ class TestGetElevRegistered:
 
     def test_unknown_spot(self):
         assert _get_elev_registered("白駒池") is None
+
+
+# =============================================
+# check_kamikochi_rime（上高地の霧氷特別ルール）
+# =============================================
+
+from tools.weather import check_kamikochi_rime
+
+GOOD = (-20.0, 0, 1.0)    # 露点, 下層雲, 風速: 3条件を満たす
+BAD = (-8.0, 60, 3.5)     # 明確に満たさない
+
+
+def _night(**hours):
+    """前夜21時〜翌6時の10時間。指定のない時刻は BAD。キーは h21〜h06。"""
+    order = ["21", "22", "23", "00", "01", "02", "03", "04", "05", "06"]
+    rows = []
+    for hh in order:
+        date = "2026-01-15" if hh in ("21", "22", "23") else "2026-01-16"
+        td, cl, w = hours.get(f"h{hh}", BAD)
+        rows.append({"time": f"{date}T{hh}:00", "temp": -8.0,
+                     "dew_point": td, "cloud_low": cl, "wind_adjusted": w})
+    return rows
+
+
+class TestKamikochiRime:
+    def test_grade_a_long_run_through_dawn(self):
+        r = check_kamikochi_rime(_night(h03=GOOD, h04=GOOD, h05=GOOD, h06=GOOD))
+        assert r["grade"] == "A"
+        assert r["longest_run"] == ["03:00", "04:00", "05:00", "06:00"]
+        assert "判定A" in r["summary_line"] and "85〜95%" in r["summary_line"]
+
+    def test_run_across_midnight_is_continuous(self):
+        r = check_kamikochi_rime(_night(h22=GOOD, h23=GOOD, h00=GOOD, h01=GOOD))
+        assert r["longest_run"] == ["22:00", "23:00", "00:00", "01:00"]
+        assert r["grade"] == "B"   # 長時間だが明け方を含まない
+
+    def test_grade_c_broken_runs(self):
+        r = check_kamikochi_rime(_night(h02=GOOD, h04=GOOD, h06=GOOD))
+        assert r["grade"] == "C"
+        assert len(r["met_hours"]) == 3
+        assert len(r["longest_run"]) == 1
+
+    def test_boundary_values_are_met(self):
+        r = check_kamikochi_rime(_night(h06=(-15.0, 9, 2.5)))
+        assert r["met_hours"] == ["06:00"]
+
+    def test_temperature_is_not_used(self):
+        rows = _night(h06=GOOD)
+        rows[-1]["temp"] = -6.0
+        assert check_kamikochi_rime(rows)["met_hours"] == ["06:00"]
+
+    def test_grade_d_single_small_shortfall(self):
+        """実績で霧氷なしだった夜: 露点-15.9℃・下層雲11%・風1.3 → 惜しい(下層雲だけ不足)"""
+        r = check_kamikochi_rime(_night(h06=(-15.9, 11, 1.3)))
+        assert r["grade"] == "D"
+        assert r["near_miss"]["condition"] == "下層雲"
+        assert r["near_miss"]["shortfall"] == 2.0
+        assert "下層雲があと2.0%不足" in r["summary_line"]
+
+    def test_two_conditions_short_is_not_near_miss(self):
+        r = check_kamikochi_rime(_night(h06=(-14.0, 12, 1.0)))
+        assert r["grade"] == "E"
+
+    def test_shortfall_beyond_margin_is_not_near_miss(self):
+        assert check_kamikochi_rime(_night(h06=(-12.5, 0, 1.0)))["grade"] == "E"   # 露点2.5℃不足
+        assert check_kamikochi_rime(_night(h06=(-20.0, 0, 3.1)))["grade"] == "E"   # 風速0.6不足
+        assert check_kamikochi_rime(_night(h06=(-20.0, 20, 1.0)))["grade"] == "E"  # 下層雲11不足
+
+    def test_shortfall_within_margin_each_condition(self):
+        assert check_kamikochi_rime(_night(h06=(-13.0, 0, 1.0)))["grade"] == "D"   # 露点2.0℃不足
+        assert check_kamikochi_rime(_night(h06=(-20.0, 0, 3.0)))["grade"] == "D"   # 風速0.5不足
+        assert check_kamikochi_rime(_night(h06=(-20.0, 19, 1.0)))["grade"] == "D"  # 下層雲10不足
+
+    def test_missing_data(self):
+        rows = _night()
+        for r in rows:
+            r["cloud_low"] = None
+        res = check_kamikochi_rime(rows)
+        assert res["grade"] is None
+        assert "判定不能" in res["summary_line"]
