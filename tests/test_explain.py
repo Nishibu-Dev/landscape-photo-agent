@@ -11,7 +11,7 @@ class TestExplainSpotLogic:
         assert r["found"] is True
         assert "湧水型" in r["text"]
         assert f"露点 ≦ {w.KAMIKOCHI_RIME_DEWPOINT_MAX:g}℃" in r["text"]
-        assert f"風速(補正後) ≦ {w.KAMIKOCHI_RIME_WIND_MAX:g}m/s" in r["text"]
+        assert f"風速 ≦ {w.KAMIKOCHI_RIME_WIND_MAX:g}m/s" in r["text"]
 
     def test_wetland_type_uses_constants(self):
         r = explain_spot_logic("田ノ原")
@@ -39,3 +39,9 @@ class TestExplainSpotLogic:
     def test_threshold_change_is_reflected(self, monkeypatch):
         monkeypatch.setattr(w, "WETLAND_RIME_RHICE_MIN", 90.0)
         assert "氷に対する湿度 ≧ 90%" in explain_spot_logic("田ノ原")["text"]
+
+    def test_wind_correction_is_not_mentioned(self):
+        """ユーザー向けの説明に、風速の補正係数は出さない"""
+        for name in ("上高地", "河童橋", "田ノ原", "美ヶ原", "女神湖", "全体"):
+            text = explain_spot_logic(name)["text"]
+            assert "補正" not in text and "係数" not in text, name

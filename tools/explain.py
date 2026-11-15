@@ -5,8 +5,8 @@
 # 閾値を変えれば説明も自動で追従する。
 # 霧のパターンの基準は ForecastAgent の指示文(agents/forecast.py)に書かれているため、
 # ここでは要約を FOG_PATTERN_SUMMARY に持つ。指示文の霧ロジックを変えたら、ここも合わせること。
+# ※ユーザー向けの説明なので、地点別の風速補正係数(WIND_ADJUSTMENTS)には触れない。
 
-from config.adjustments import get_wind_factor, WIND_ADJUSTMENTS
 from config.spots import (
     DEFAULT_SPOTS,
     EXTRA_SPOTS,
@@ -20,14 +20,14 @@ from config.spots import (
 )
 from tools import weather as w
 
-FOG_COMMON = "T-Td ≦ 1.5℃・湿度 ≧ 90%・風速(補正後) ≦ 1.5m/s"
+FOG_COMMON = "T-Td ≦ 1.5℃・湿度 ≧ 90%・風速 ≦ 1.5m/s"
 FOG_PATTERN_SUMMARY = {
     "A": f"鉄板組(湿原系×盆地地形×水域近接)。共通3条件({FOG_COMMON})のうち T-Td を ≦ 2℃ に緩和。全条件そろえば 80〜90%",
     "B": f"隠れ強豪(高原系×水域近接×湿原内包)。パターンAと同等の緩めの基準。全条件そろえば 75〜85%",
     "C": "気まぐれ(湿原系×盆地地形×乾燥湿原)。T-Td ≦ 1.0℃ かつ 湿度 ≧ 95% に厳格化。全条件そろえば 70〜75%",
     "D": f"湖畔派(湖畔×水域近接)。緩和なしで共通3条件({FOG_COMMON})。全条件そろえば 70%",
     "E": f"谷筋派(谷筋×水域近接)。緩和なしで共通3条件({FOG_COMMON})。全条件そろえば 70%",
-    None: f"パターンなし。地形補正なしで共通3条件({FOG_COMMON})。全条件そろえば 70%",
+    None: f"パターンなし。地形による緩和なしで共通3条件({FOG_COMMON})。全条件そろえば 70%",
 }
 RIDGE_NOTE = "尾根沿い(稜線上・峠)のため霧は出にくく(原則20%以下)、代わりに雲海とガス(雲中)を予測する"
 
@@ -52,7 +52,7 @@ def _rime_logic_lines(rime_type: str) -> list[str]:
         lines += [
             "■霧氷の判定(Pythonで機械判定。1時間ごと)",
             f"  成立条件: 露点 ≦ {w.KAMIKOCHI_RIME_DEWPOINT_MAX:g}℃ かつ 下層雲 < {w.KAMIKOCHI_RIME_CLOUD_LOW_MAX:g}% "
-            f"かつ 風速(補正後) ≦ {w.KAMIKOCHI_RIME_WIND_MAX:g}m/s(強いと霧氷が飛ばされる)",
+            f"かつ 風速 ≦ {w.KAMIKOCHI_RIME_WIND_MAX:g}m/s(強いと霧氷が飛ばされる)",
             f"  夜全体: {w.KAMIKOCHI_RIME_LONG_RUN_HOURS}時間以上の連続成立と、明け方"
             f"({'・'.join(h[:2] + '時' for h in w.KAMIKOCHI_RIME_DAWN_HOURS)})の成立を重視",
             f"  「惜しい」: 1条件だけが、露点{m['露点']:g}℃・下層雲{m['下層雲']:g}ポイント・風速{m['風速']:g}m/s 以内で足りない",
@@ -124,7 +124,6 @@ def explain_spot_logic(spot_name: str) -> dict:
             f"「{name}」は登録地点ではない。予測を頼まれたときは次のように扱う。",
             "・Google Mapsで座標と標高を調べる",
             "・地名と標高から、LLMが地形タグと霧のパターン(A〜E)を推定し、次回以降のために保存する",
-            f"・風速の補正係数は標準の ×{WIND_ADJUSTMENTS['default']}",
             "・霧: 推定した霧のパターンの基準で判定する",
             *_rime_logic_lines(RIME_TYPE_DEFAULT),
         ]
@@ -136,14 +135,13 @@ def explain_spot_logic(spot_name: str) -> dict:
     tags = attrs.get("tags", [])
     lines = [
         f"■地点: {sname}(標高{spot['elev']}m)",
-        f"■風速の補正係数: ×{get_wind_factor(sname)}(予報の風速にこの係数を掛けて判定に使う)",
         f"■霧のパターン: {pattern or 'なし'}(地形タグ: {'・'.join(tags) or 'なし'})",
         f"  {FOG_PATTERN_SUMMARY.get(pattern, FOG_PATTERN_SUMMARY[None])}",
     ]
     if "稜線上" in tags or "峠" in tags:
         lines.append(f"  {RIDGE_NOTE}")
     lines += _rime_logic_lines(get_rime_type(sname))
-    lines.append("■凝華(ダイヤモンドダスト): 気温 ≦ -10℃ かつ 風速(補正後) ≦ 2m/s かつ 快晴")
+    lines.append("■凝華(ダイヤモンドダスト): 気温 ≦ -10℃ かつ 風速 ≦ 2m/s かつ 快晴")
     if sname == "田ノ原湿原":
         lines.append("  田ノ原は冷気溜まりになりやすく、快晴・無風・-10℃以下なら凝華の確率を特に高く見積もる")
     prio = attrs.get("phenomena_priority")
