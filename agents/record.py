@@ -4,8 +4,8 @@ import os
 import re
 from datetime import datetime, timezone, timedelta
 from google.adk.agents import LlmAgent
+from config.models import model_for, generate_content_config_for
 from google.adk.tools import FunctionTool
-from google.genai import types
 
 from tools.storage import append_to_json_list, find_latest_prediction_id
 from tools.location import resolve_location
@@ -270,12 +270,10 @@ save_actual_tool = FunctionTool(func=save_actual)
 
 record_agent = LlmAgent(
     name="RecordAgent",
-    model="gemini-2.5-flash",
+    model=model_for("RecordAgent"),
     description="ユーザーの撮影実績（霧氷・凝華・放射霧・雲海・霧・光）を記録するエージェント。",
     instruction=RECORD_INSTRUCTION,
     tools=[save_actual_tool],
     output_key="record_result",
-    generate_content_config=types.GenerateContentConfig(
-        temperature=0.1,
-    ),
+    generate_content_config=generate_content_config_for("RecordAgent"),
 )

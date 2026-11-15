@@ -15,8 +15,8 @@
 import os
 from datetime import datetime, timezone, timedelta
 from google.adk.agents import LlmAgent
+from config.models import model_for, generate_content_config_for
 from google.adk.tools import FunctionTool
-from google.genai import types
 
 from tools.weather import fetch_forecast, fetch_all_forecasts
 from tools.location import (
@@ -353,11 +353,8 @@ fetch_all_forecasts_tool      = FunctionTool(func=fetch_all_forecasts)
 
 forecast_agent = LlmAgent(
     name="ForecastAgent",
-    # 速度改善: gemini-2.5-flash → gemini-3.1-flash-lite。
-    # 3.1-flash-lite は 2.5 Flash 相当の指示追従性・品質を保ちつつ
-    # レイテンシが小さく、複数ツール往復を伴う本エージェントの
-    # 処理時間短縮に効く。予測精度は出力を見て要確認。
-    model="gemini-2.5-flash",
+    # モデルと思考レベルは config/models.py で一括管理する
+    model=model_for("ForecastAgent"),
     description=(
         "ユーザーが指定した地点の翌朝の撮影コンディション"
         "（光・霧・霧氷・凝華）を予測する。登録外の地点も地形から判定する。"
@@ -372,12 +369,6 @@ forecast_agent = LlmAgent(
         fetch_all_forecasts_tool,
     ],
     output_key="prediction_result",
-    # 同じ気象データに対する確率出力のブレを抑えるため低温度に固定。
-    # ※ gemini-2.5-flash 系は thinking がモデル既定機能のため、
-    #   thinking_budget を明示設定すると 400 エラーになる場合がある。
-    #   よって thinking は設定せずモデル既定に任せる。
-    #   速度はモデル選定(将来 3.1-flash 等)と min-instances で稼ぐ。
-    generate_content_config=types.GenerateContentConfig(
-        temperature=0.1,
-    ),
+    # Gemini 3 系は temperature を既定のまま使うことが推奨されているため指定しない。
+    generate_content_config=generate_content_config_for("ForecastAgent"),
 )

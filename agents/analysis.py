@@ -2,8 +2,8 @@
 # また、利用者が見つけた霧のパターンをノウハウとして地点別に蓄積する。
 
 from google.adk.agents import LlmAgent
+from config.models import model_for, generate_content_config_for
 from google.adk.tools import FunctionTool
-from google.genai import types
 
 from tools.analysis import analyze_prediction_accuracy, save_fog_knowledge
 from tools.logger import get_logger
@@ -58,7 +58,7 @@ save_fog_knowledge_tool = FunctionTool(func=save_fog_knowledge)
 
 analysis_agent = LlmAgent(
     name="AnalysisAgent",
-    model="gemini-2.5-flash",
+    model=model_for("AnalysisAgent"),
     description=(
         "予測ログ(predictions.json)と撮影実績(actuals.json)を突き合わせ、"
         "予測値と実測値・霧の実績のズレを検証する予測精度検証を行い、"
@@ -67,7 +67,5 @@ analysis_agent = LlmAgent(
     instruction=ANALYSIS_INSTRUCTION,
     tools=[analyze_prediction_accuracy_tool, save_fog_knowledge_tool],
     output_key="analysis_result",
-    generate_content_config=types.GenerateContentConfig(
-        temperature=0.1,
-    ),
+    generate_content_config=generate_content_config_for("AnalysisAgent"),
 )

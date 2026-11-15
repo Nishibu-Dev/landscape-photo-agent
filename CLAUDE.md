@@ -24,8 +24,8 @@ PhotoConcierge (coordinator.py)    ← root_agent。意図判定してルーテ�
   └── AnalysisAgent (analysis.py)  ← 予測精度の検証 + ノウハウ蓄積
 ```
 
-- 全エージェントが `LlmAgent`（モデル: `gemini-2.5-flash`）
-- Coordinator は `thinking_budget=0` で即応答（ルーティングに深い思考は不要）
+- 全エージェントが `LlmAgent`（モデル: `gemini-3.5-flash-lite`。モデルと思考レベルは `config/models.py` で一括管理）
+- 思考レベル: Coordinator は `low`（速さ優先）、Forecast は `high`、Record・Analysis は `medium`
 - 各エージェントの instruction はファイル内の Python 文字列で直接定義（外部 Markdown ではない）
 
 ### ディレクトリ構成
@@ -48,6 +48,7 @@ landscape-photo-agent/
 │   └── logger.py            # Cloud Logging 向け構造化ロガー（trace_id/user_id を ContextVar で伝搬）
 ├── config/
 │   ├── spots.py             # DEFAULT_SPOTS（10地点）, EXTRA_SPOTS, SPOT_ALIASES, SPOT_ATTRIBUTES
+│   ├── models.py            # 各エージェントの Gemini モデルと思考レベル
 │   └── adjustments.py       # WIND_ADJUSTMENTS（地点別風速補正係数）
 ├── tests/
 │   ├── conftest.py          # sys.path 設定
@@ -77,7 +78,7 @@ landscape-photo-agent/
 
 - **ランタイム**: Python 3.12 / FastAPI / uvicorn
 - **エージェント**: Google ADK (`google-adk==1.33.0`)
-- **LLM**: Gemini 2.5 Flash（Google AI Studio 経由）
+- **LLM**: Gemini 3.5 Flash-Lite（Google AI Studio 経由）
 - **気象データ**: Open-Meteo API（JMA MSM モデル、forecast + archive）
 - **地点解決**: Google Maps Places API (New) + Elevation API
 - **データストア**: Google Drive 上の JSON ファイル群（Drive API でサービスアカウント認証）
