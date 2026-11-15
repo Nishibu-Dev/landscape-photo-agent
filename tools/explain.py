@@ -35,7 +35,7 @@ RIME_TYPE_DESCRIPTION = {
     RIME_TYPE_SPRING: "凍らない湧水・梓川の水蒸気が、乾いた晴れの夜に冷えた枝に凍りつくタイプ。"
                       "空気が乾いている夜ほど出やすく、気温は判定に使わない。",
     RIME_TYPE_WETLAND: "盆地にたまった湿った空気(雲・霧を含む)から霧氷が育つタイプ。"
-                       "明け方まで湿り気が保たれるかが鍵で、晴れて乾いていく夜は出ない。風が強くても出る。",
+                       "明け方まで湿り気が保たれるかが鍵で、晴れて乾いていく夜は出ない。強風(風速が上限超)の夜は育たない。",
     RIME_TYPE_DEFAULT: "地点が雲や霧の中に入り、過冷却の粒が枝について凍るタイプとして扱う"
                        "(タイプが確定していない地点もここ)。",
 }
@@ -72,11 +72,12 @@ def _rime_logic_lines(rime_type: str) -> list[str]:
         lines += [
             "■霧氷の判定(Pythonで機械判定。1時間ごと)",
             f"  成立条件: 気温 ≦ {w.WETLAND_RIME_TEMP_MAX:g}℃ かつ 氷に対する湿度 ≧ {w.WETLAND_RIME_RHICE_MIN:g}% "
-            f"かつ 下層雲 ≧ {w.WETLAND_RIME_CLOUD_LOW_MIN:g}%(風速の上限なし)",
+            f"かつ 下層雲 ≧ {w.WETLAND_RIME_CLOUD_LOW_MIN:g}% かつ 風速 ≦ {w.WETLAND_RIME_WIND_MAX:g}m/s",
             "  ※氷に対する湿度は気温と露点から計算。氷点下では、水に対して飽和に近い空気は氷に対して過飽和になる",
             f"  夜全体: 明け方を含む連続成立が{w.WETLAND_RIME_LONG_RUN_HOURS}時間以上かどうかで判定",
             f"  「惜しい」: 明け方の時刻に、1条件だけが湿度{m['氷に対する湿度']:g}ポイント・下層雲{m['下層雲']:g}ポイント・"
-            f"気温{m['気温']:g}℃ 以内で足りない",
+            f"気温{m['気温']:g}℃・風速{m['風速']:g}m/s 以内で足りない",
+            "  風速の上限は暫定。これまでの霧氷ありの夜は、風速が最大でも約1.4m/s(踊場)だったため",
             f"  乾いていく夜: 0時→6時で T-Td が {w.WETLAND_RIME_DRYING_SPREAD:g}℃ 以上広がったら"
             f" {w.WETLAND_RIME_DRYING_DOWNGRADE_STEPS}段階格下げ",
             *_grades_text(w.WETLAND_RIME_GRADES),
@@ -92,7 +93,11 @@ def _rime_logic_lines(rime_type: str) -> list[str]:
             f"  「惜しい」: 明け方の時刻に、1条件だけが気温{m['気温']:g}℃・T-Td {m['T-Td']:g}℃ 以内で足りない",
             *_grades_text(w.CLOUD_RIME_GRADES),
             "  尾根沿いの地点では、霧氷はガス(雲中)と同じ向きに見積もる(雲の上に出ている雲海の朝は出にくい)",
+            f"  風速の上限はなし(雲の粒が枝にぶつかって凍るため、風はむしろ霧氷を育てる)。明け方の風速が"
+            f"{w.CLOUD_RIME_STRONG_WIND:g}m/sを超える朝は、繊細な霧氷より{w.CLOUD_RIME_STRONG_WIND_FORM}になりやすい",
         ]
+    label, prob = w.RIME_NO_FREEZE_GRADE
+    lines.append(f"  判定0: {label}(最低気温 > {w.RIME_FREEZE_TEMP:g}℃) → 霧氷 {prob}(どのタイプでも共通)")
     lines.append("  ※閾値は暫定値。今期の実績で見直す予定")
     return lines
 

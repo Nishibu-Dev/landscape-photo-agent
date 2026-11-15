@@ -55,3 +55,16 @@ class TestExplainSpotLogic:
         for name in ("上高地", "河童橋", "田ノ原", "美ヶ原", "女神湖", "全体"):
             text = explain_spot_logic(name)["text"]
             assert "補正" not in text and "係数" not in text, name
+
+
+class TestExplainNoFreeze:
+    def test_all_types_show_zero_rule(self):
+        for name in ("上高地", "田ノ原", "美ヶ原"):
+            assert "判定0: 一晩中氷点下にならない" in explain_spot_logic(name)["text"]
+            assert "霧氷 0%" in explain_spot_logic(name)["text"]
+
+
+class TestExplainCloudStrongWind:
+    def test_cloud_type_mentions_ebi(self):
+        text = explain_spot_logic("千畳敷カール")["text"]
+        assert "エビのしっぽ" in text and "補正" not in text
