@@ -114,3 +114,39 @@ class TestWindFactor:
         """補正係数は 0 < factor <= 1 の範囲であること"""
         for name, factor in WIND_ADJUSTMENTS.items():
             assert 0 < factor <= 1, f"{name} の係数 {factor} が範囲外"
+
+
+# =============================================
+# 霧氷のタイプ・河童橋
+# =============================================
+
+from config.spots import (
+    get_rime_type,
+    RIME_TYPE_WETLAND,
+    RIME_TYPE_SPRING,
+    RIME_TYPE_DEFAULT,
+)
+
+
+class TestRimeType:
+    def test_wetland_spots(self):
+        assert get_rime_type("田ノ原湿原") == RIME_TYPE_WETLAND
+        assert get_rime_type("霧ヶ峰") == RIME_TYPE_WETLAND   # 踊場湿原のエイリアス
+
+    def test_spring_spots(self):
+        assert get_rime_type("上高地") == RIME_TYPE_SPRING
+        assert get_rime_type("河童橋") == RIME_TYPE_SPRING
+
+    def test_default_for_unconfirmed_and_unknown(self):
+        assert get_rime_type("戦場ヶ原") == RIME_TYPE_DEFAULT
+        assert get_rime_type("美ヶ原") == RIME_TYPE_DEFAULT
+        assert get_rime_type("女神湖") == RIME_TYPE_DEFAULT
+
+    def test_kappabashi_registered(self):
+        spot = get_spot_by_name("上高地河童橋")
+        assert spot is not None and spot["name"] == "河童橋(上高地)"
+        assert get_wind_factor("河童橋(上高地)") == 0.2
+        assert get_spot_attributes("河童橋")["pattern"] == "E"
+
+    def test_kappabashi_not_in_recommend(self):
+        assert all(s["name"] != "河童橋(上高地)" for s in DEFAULT_SPOTS)

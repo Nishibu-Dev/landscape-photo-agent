@@ -155,3 +155,81 @@ class TestKamikochiRime:
         res = check_kamikochi_rime(rows)
         assert res["grade"] is None
         assert "判定不能" in res["summary_line"]
+
+
+# =============================================
+# check_wetland_rime（湿原・盆地型の霧氷ルール）
+# =============================================
+
+from tools.weather import check_wetland_rime, rh_ice
+
+
+def _wnight(T, D, C):
+    """0〜6時の7時間分。T=気温, D=露点, C=下層雲 のリスト。"""
+    hrs = ["00", "01", "02", "03", "04", "05", "06"]
+    return [{"time": f"2026-01-16T{h}:00", "temp": t, "dew_point": d,
+             "cloud_low": c, "wind_adjusted": 5.0} for h, t, d, c in zip(hrs, T, D, C)]
+
+
+class TestRhIce:
+    def test_saturated_air_is_supersaturated_over_ice(self):
+        assert 109 < rh_ice(-10.0, -10.0) < 111
+
+    def test_spread_reduces_humidity(self):
+        assert rh_ice(-10.0, -13.0) < rh_ice(-10.0, -11.0)
+
+
+class TestWetlandRime:
+    # 田ノ原の実績(グラフ目読み)から
+    def test_humid_cloudy_night_is_grade_a(self):
+        r = check_wetland_rime(_wnight(
+            [-6.4, -6.6, -6.7, -6.8, -6.8, -6.8, -7.1],
+            [-6.7, -6.8, -7.0, -7.2, -7.1, -7.1, -7.5],
+            [96, 79, 75, 60, 48, 39, 41]))
+        assert r["grade"] == "A"
+        assert r["dawn_run"][-1] == "06:00"
+
+    def test_strong_wind_does_not_block(self):
+        r = check_wetland_rime(_wnight([-9.0] * 7, [-11.0] * 7, [30] * 7))
+        assert r["grade"] == "A"   # 風速5.0でも成立(上限なし)
+
+    def test_clearing_and_drying_night_is_grade_d(self):
+        """晴れていき乾いていった夜(田ノ原・霧氷なし): 惜しいC → 乾燥化で格下げ D"""
+        r = check_wetland_rime(_wnight(
+            [-6.4, -6.6, -7.1, -8.2, -9.0, -9.7, -10.3],
+            [-8.5, -9.0, -9.7, -11.1, -12.1, -13.5, -15.5],
+            [23, 19, 17, 14, 12, 6, 1]))
+        assert r["downgraded"] is True
+        assert r["spread_change"] == 3.1
+        assert r["grade"] == "D"
+        assert "格下げ前は判定C" in r["summary_line"]
+
+    def test_short_dawn_run_is_grade_b(self):
+        r = check_wetland_rime(_wnight([-9.0] * 7, [-11.0] * 7, [0, 0, 0, 0, 0, 30, 30]))
+        assert r["grade"] == "B"
+        assert r["dawn_run"] == ["05:00", "06:00"]
+
+    def test_met_only_before_dawn_is_not_counted(self):
+        r = check_wetland_rime(_wnight([-9.0] * 7, [-11.0] * 7, [30, 30, 30, 0, 0, 0, 0]))
+        assert r["grade"] == "D"
+        assert "明け方以外のみ" in r["summary_line"]
+
+    def test_near_miss_at_dawn_is_grade_c(self):
+        r = check_wetland_rime(_wnight([-9.0] * 7, [-11.0] * 7, [0, 0, 0, 0, 12, 0, 0]))
+        assert r["grade"] == "C"
+        assert r["near_miss"]["condition"] == "下層雲"
+        assert r["near_miss"]["shortfall"] == 8.0
+
+    def test_two_conditions_short_is_not_near_miss(self):
+        r = check_wetland_rime(_wnight([-9.0] * 7, [-14.0] * 7, [12] * 7))
+        assert r["grade"] == "D"
+
+    def test_above_minus_two_is_not_met(self):
+        r = check_wetland_rime(_wnight([-1.5] * 7, [-1.6] * 7, [50] * 7))
+        assert r["grade"] == "C"   # 気温だけ0.5℃不足 → 惜しい
+
+    def test_missing_data(self):
+        rows = _wnight([-9.0] * 7, [-11.0] * 7, [None] * 7)
+        r = check_wetland_rime(rows)
+        assert r["grade"] is None
+        assert "判定不能" in r["summary_line"]

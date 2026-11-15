@@ -1,0 +1,41 @@
+# tests/test_explain.py
+# tools/explain.py: 説明が実際の判定に使う定数と一致していること
+
+from tools import weather as w
+from tools.explain import explain_spot_logic
+
+
+class TestExplainSpotLogic:
+    def test_spring_type_uses_constants(self):
+        r = explain_spot_logic("上高地")
+        assert r["found"] is True
+        assert "湧水型" in r["text"]
+        assert f"露点 ≦ {w.KAMIKOCHI_RIME_DEWPOINT_MAX:g}℃" in r["text"]
+        assert f"風速(補正後) ≦ {w.KAMIKOCHI_RIME_WIND_MAX:g}m/s" in r["text"]
+
+    def test_wetland_type_uses_constants(self):
+        r = explain_spot_logic("田ノ原")
+        assert "湿原・盆地型" in r["text"]
+        assert f"氷に対する湿度 ≧ {w.WETLAND_RIME_RHICE_MIN:g}%" in r["text"]
+        assert "凝華" in r["text"]
+
+    def test_kappabashi(self):
+        r = explain_spot_logic("河童橋")
+        assert "河童橋(上高地)" in r["text"] and "湧水型" in r["text"]
+
+    def test_default_type(self):
+        assert "共通条件" in explain_spot_logic("美ヶ原")["text"]
+
+    def test_unknown_spot(self):
+        r = explain_spot_logic("女神湖")
+        assert r["found"] is False
+        assert "登録地点ではない" in r["text"] and "雲中型・未確定" in r["text"]
+
+    def test_overview(self):
+        r = explain_spot_logic("全体")
+        assert "田代湿原(上高地)、河童橋(上高地)" in r["text"]
+        assert "霧氷の判定には使わない" in r["text"]
+
+    def test_threshold_change_is_reflected(self, monkeypatch):
+        monkeypatch.setattr(w, "WETLAND_RIME_RHICE_MIN", 90.0)
+        assert "氷に対する湿度 ≧ 90%" in explain_spot_logic("田ノ原")["text"]

@@ -1,11 +1,13 @@
 # PhotoConcierge: ユーザーの意図を判定してL2エージェントにルーティングする
 
 from google.adk.agents import LlmAgent
+from google.adk.tools import FunctionTool
 from google.adk.planners import BuiltInPlanner
 from google.genai import types
 from agents.forecast import forecast_agent
 from agents.record import record_agent
 from agents.analysis import analysis_agent
+from tools.explain import explain_spot_logic
 
 COORDINATOR_INSTRUCTION = """
 あなたは風景写真家向けの撮影コンシェルジュです。
@@ -14,6 +16,17 @@ COORDINATOR_INSTRUCTION = """
 ==============================================
 【ルーティングルール】
 ==============================================
+
+■ 最優先: このBotの予測ロジックの説明（委譲しない）
+「ロジック」「判定基準」「条件」「どうやって予測」「仕組み」「基準」などの語とともに、
+このBotの予測の仕方を尋ねている場合（例:「上高地の霧氷のロジックを教えて」
+「田ノ原はどういう条件で霧氷ありになる?」「霧氷の判定基準は?」）は、地点名が含まれていても
+ForecastAgent に委譲せず、explain_spot_logic ツールを呼んで自分で答えること。
+- 地点名があれば explain_spot_logic(地点名)、地点を特定しない質問なら explain_spot_logic("全体")。
+- 回答はツールが返した内容（閾値・判定区分・確率の目安）だけに基づくこと。
+  一般的な気象知識で閾値や条件を補ったり、言い換えて別の数値を出したりしてはいけない。
+- 必要なら「なぜその条件なのか」をツールの説明の範囲で分かりやすく補足してよい。
+- 翌朝の予報そのもの（確率）を聞かれた場合は、従来どおり ForecastAgent に委譲する。
 
 ■ ForecastAgent に委譲するケース
 以下のいずれかに該当する場合:
@@ -46,6 +59,7 @@ COORDINATOR_INSTRUCTION = """
 - 雑談・感想・感情表現（「疲れた」「嬉しい」「すごい」など）
 - 風景写真・撮影技術・気象現象に関する一般的な質問
   （例: 「霧氷ってどうやってできるの?」「放射霧と蒸気霧の違いは?」）
+  ※このBotの予測ロジックを尋ねる質問は、上の「最優先」に従うこと
 - 使い方・機能に関する質問
 
 これらは風景写真と撮影に詳しいアシスタントとして自然に会話すること。
@@ -75,6 +89,7 @@ photo_concierge = LlmAgent(
     description="ユーザーの意図を判定し、予測・記録・案内の適切な処理に振り分けるコーディネーター。",
     instruction=COORDINATOR_INSTRUCTION,
     sub_agents=[forecast_agent, record_agent, analysis_agent],
+    tools=[FunctionTool(func=explain_spot_logic)],
     # 「こんばんは」のような短い入力でも 2.5-flash の内部思考に時間がかかり
     # 1 分超のレイテンシが出ていたため、思考時間を抑制する。
     # ルーティング判定は instruction で明示しており深い思考は不要なので

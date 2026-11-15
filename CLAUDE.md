@@ -43,6 +43,7 @@ landscape-photo-agent/
 │   ├── location.py          # resolve_location, classify_spot_group, geocode_unknown_spot
 │   ├── storage.py           # Google Drive JSON 読み書き（read_json, write_json, append_to_json_list）
 │   ├── analysis.py          # analyze_prediction_accuracy, save_fog_knowledge
+│   ├── explain.py           # explain_spot_logic（予測ロジックの説明。PhotoConcierge が使う）
 │   ├── line_client.py       # LINE Push API（push_message）
 │   └── logger.py            # Cloud Logging 向け構造化ロガー（trace_id/user_id を ContextVar で伝搬）
 ├── config/
@@ -54,7 +55,8 @@ landscape-photo-agent/
 │   ├── test_record_date.py  # 日付解決ロジック
 │   ├── test_analysis.py     # 霧分類・閾値・時間窓
 │   ├── test_weather.py      # 時刻生成・降水集計
-│   └── test_location.py     # 地点名サニタイズ
+│   ├── test_location.py     # 地点名サニタイズ
+│   └── test_explain.py      # ロジック説明ツール
 ├── Dockerfile
 ├── requirements.txt
 └── .claude/
