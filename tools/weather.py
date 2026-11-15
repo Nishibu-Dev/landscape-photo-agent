@@ -5,7 +5,7 @@ import httpx
 from datetime import datetime, timezone, timedelta
 import math
 from config.adjustments import get_wind_factor
-from config.spots import get_rime_type, RIME_TYPE_WETLAND, RIME_TYPE_SPRING
+from config.spots import get_rime_type, RIME_TYPE_WETLAND, RIME_TYPE_SPRING, RIME_TYPE_DEFAULT
 from tools.logger import get_logger
 
 logger = get_logger(__name__)
@@ -169,17 +169,16 @@ async def _fetch_forecast_full(lat: float, lng: float, spot_name: str,
     prev_day_precip = _sum_prev_day_precip(hourly, base_date)
 
     summary = _build_summary(spot_name, factor, result_hourly, prev_day_precip)
-    # 霧氷のタイプが確定している地点(湧水型・湿原・盆地型)は、Pythonで機械判定し、
-    # 結果を要約の末尾に1行で明示する(LLMが数値の読み落としや解釈でぶれるのを防ぐため)。
-    # それ以外(雲中型・未確定)は、指示文の共通ルール3でLLMが判定する。
+    # 霧氷は全地点をPythonで機械判定し、結果を要約の末尾に1行で明示する
+    # (LLMが数値の読み落としや解釈でぶれるのを防ぐため)。タイプごとに判定を切り替える。
     rime_type = get_rime_type(spot_name)
-    rime_judgement = None
     if rime_type == RIME_TYPE_SPRING:
         rime_judgement = check_spring_rime(result_hourly)
     elif rime_type == RIME_TYPE_WETLAND:
         rime_judgement = check_wetland_rime(result_hourly)
-    if rime_judgement is not None:
-        summary = summary + "\n" + rime_judgement["summary_line"]
+    else:
+        rime_judgement = check_cloud_rime(result_hourly)
+    summary = summary + "\n" + rime_judgement["summary_line"]
 
     elev = await _resolve_elev(spot_name, lat, lng)
 
@@ -194,8 +193,7 @@ async def _fetch_forecast_full(lat: float, lng: float, spot_name: str,
         "summary":    summary,
     }
     result["rime_type"] = rime_type
-    if rime_judgement is not None:
-        result["rime_judgement"] = {k: v for k, v in rime_judgement.items() if k != "summary_line"}
+    result["rime_judgement"] = {k: v for k, v in rime_judgement.items() if k != "summary_line"}
 
     # 予測スナップショットを predictions.json へ即保存(LLMのsave_prediction呼び出しに依存しない)。
     # 確率テキストはこの時点で未確定のため空で保存し、weather_data(実値)を確実に残す。
@@ -445,6 +443,7 @@ def _sum_prev_day_precip(hourly: dict, target_today_str: str) -> float:
 KAMIKOCHI_RIME_DEWPOINT_MAX = -15.0   # 露点(℃) これ以下
 KAMIKOCHI_RIME_CLOUD_LOW_MAX = 10.0   # 下層雲(%) これ未満
 KAMIKOCHI_RIME_WIND_MAX = 2.5         # 風速 補正後(m/s) これ以下
+KAMIKOCHI_RIME_TEMP_MAX = 0.0         # 前提条件: 気温(℃) これ以下(氷点下でなければ枝で凍らない)
 KAMIKOCHI_RIME_LONG_RUN_HOURS = 3     # この時間以上の連続成立で「長時間」
 KAMIKOCHI_RIME_DAWN_HOURS = ("04:00", "05:00", "06:00")  # 明け方(撮影時間帯)
 # 「惜しい」: 1条件だけが、この幅以内で足りない(残り2条件は満たす)
@@ -491,11 +490,17 @@ def check_spring_rime(hourly: list[dict]) -> dict:
     near_miss = None
     near_miss_score = None
     has_data = False
+    min_temp = None
     for h in hourly:
         td, cl, w = h.get("dew_point"), h.get("cloud_low"), h.get("wind_adjusted")
         if td is None or cl is None or w is None:
             continue
         has_data = True
+        t = h.get("temp")
+        if t is not None:
+            min_temp = t if min_temp is None else min(min_temp, t)
+            if t > KAMIKOCHI_RIME_TEMP_MAX:
+                continue   # 前提条件(氷点下)を満たさない時刻は、成立にも「惜しい」にも数えない
         gaps = _kamikochi_gaps(td, cl, w)
         short = {k: v for k, v in gaps.items() if v > 0}
         if not short:
@@ -537,7 +542,7 @@ def check_spring_rime(hourly: list[dict]) -> dict:
         grade = "E"
     label, prob = KAMIKOCHI_RIME_GRADES[grade]
 
-    rule = (f"露点≦{KAMIKOCHI_RIME_DEWPOINT_MAX:g}℃・下層雲<{KAMIKOCHI_RIME_CLOUD_LOW_MAX:g}%・"
+    rule = (f"氷点下で 露点≦{KAMIKOCHI_RIME_DEWPOINT_MAX:g}℃・下層雲<{KAMIKOCHI_RIME_CLOUD_LOW_MAX:g}%・"
             f"風速≦{KAMIKOCHI_RIME_WIND_MAX:g}m/s")
     head = f"【湧水型霧氷ルール({rule})】判定{grade}: {label}(霧氷の確率目安 {prob})"
     if not has_data:
@@ -555,8 +560,10 @@ def check_spring_rime(hourly: list[dict]) -> dict:
                 f"参考T:{near_miss['temp']}℃)")
     else:
         line = head
+    if has_data and min_temp is not None and min_temp > KAMIKOCHI_RIME_TEMP_MAX:
+        line += f" / 一晩中氷点下にならない(最低気温 {min_temp}℃)ため霧氷はできない"
 
-    return {"rime_type": RIME_TYPE_SPRING, "grade": grade, "grade_label": label, "probability": prob,
+    return {"rime_type": RIME_TYPE_SPRING, "min_temp": min_temp, "grade": grade, "grade_label": label, "probability": prob,
             "met_hours": [t[11:16] for t in met_times],
             "longest_run": longest_hhmm, "near_miss": near_miss, "summary_line": line}
 
@@ -703,6 +710,9 @@ def check_wetland_rime(hourly: list[dict]) -> dict:
         parts.append(f"明け方で最も惜しいのは{near_miss['time']}: {near_miss['condition']}があと"
                      f"{near_miss['shortfall']}{unit}不足 (T:{near_miss['temp']}℃, "
                      f"氷に対する湿度:{near_miss['rh_ice']}%, 下層雲:{near_miss['cloud_low']}%)")
+    temps = [h.get("temp") for h in hourly if h.get("temp") is not None]
+    if temps and min(temps) > WETLAND_RIME_TEMP_MAX:
+        parts.append(f"一晩中{WETLAND_RIME_TEMP_MAX:g}℃を下回らない(最低気温 {min(temps)}℃)")
     if spread_change is not None:
         txt = f"0時→6時のT-Td変化 {spread_change:+.1f}℃"
         if downgraded:
@@ -714,6 +724,114 @@ def check_wetland_rime(hourly: list[dict]) -> dict:
             "probability": prob, "met_hours": [x[11:16] for x in met_times],
             "dawn_run": dawn_run, "near_miss": near_miss, "spread_change": spread_change,
             "downgraded": downgraded, "summary_line": " / ".join(parts)}
+
+
+# ---------------------------------------------------------------------------
+# 雲中型・未確定の霧氷ルール(上記2タイプ以外の登録地点と、未登録の地点すべて)
+#   地点が雲や霧の中に入り、過冷却の粒が枝について凍る。1時間ごとに
+#     気温 ≦ -1℃ かつ T-Td ≦ 1.5℃(ほぼ飽和)
+#   がそろえば成立。撮影は明け方なので、明け方(4〜6時)の成立を重視する。
+#   以前は LLM が指示文の共通ルールで判定していたが、気温条件の見落とし
+#   (5℃の夜に霧氷30%など)が起きたため Python の機械判定に移した。
+#   確率の目安は仮の値(雲中型のデータは美ヶ原のグラフのみ)。実績で見直す。
+# ---------------------------------------------------------------------------
+CLOUD_RIME_TEMP_MAX = -1.0            # 気温(℃) これ以下
+CLOUD_RIME_SPREAD_MAX = 1.5           # T-Td(℃) これ以下
+CLOUD_RIME_LONG_RUN_HOURS = 3
+CLOUD_NEAR_MISS_MARGIN = {"気温": 1.0, "T-Td": 0.5}
+
+CLOUD_RIME_GRADES = {
+    "A": ("成立・明け方まで3時間以上継続", "60〜80%"),
+    "B": ("明け方に成立・継続は短い", "40〜60%"),
+    "C": ("明け方は不成立・惜しい", "20〜30%"),
+    "D": ("不成立", "10%以下"),
+}
+
+
+def check_cloud_rime(hourly: list[dict]) -> dict:
+    """
+    雲中型・未確定の霧氷ルールを時間ごとに判定し、A〜D の区分を返す。
+
+    A: 明け方(4〜6時)を含んで3時間以上連続で成立
+    B: 明け方に成立しているが、その連続が3時間未満
+    C: 明け方は不成立だが、明け方の時刻に1条件だけが小さい幅で足りない(惜しい)
+    D: 不成立(一晩中 -1℃ を下回らない夜は必ずここ)
+    """
+    met_times = []
+    near_miss = None
+    near_miss_score = None
+    temps = []
+    for h in hourly:
+        t, td = h.get("temp"), h.get("dew_point")
+        if t is None or td is None:
+            continue
+        temps.append(t)
+        hhmm = h["time"][11:16]
+        gaps = {
+            "気温": round(max(0.0, t - CLOUD_RIME_TEMP_MAX), 1),
+            "T-Td": round(max(0.0, (t - td) - CLOUD_RIME_SPREAD_MAX), 1),
+        }
+        short = {k: v for k, v in gaps.items() if v > 0}
+        if not short:
+            met_times.append(h["time"])
+            continue
+        if hhmm in KAMIKOCHI_RIME_DAWN_HOURS and len(short) == 1:
+            (name, gap), = short.items()
+            margin = CLOUD_NEAR_MISS_MARGIN[name]
+            if gap <= margin:
+                score = gap / margin
+                if near_miss_score is None or score < near_miss_score:
+                    near_miss_score = score
+                    near_miss = {"time": hhmm, "condition": name, "shortfall": gap,
+                                 "temp": t, "dew_point": td}
+
+    rule = f"気温≦{CLOUD_RIME_TEMP_MAX:g}℃・T-Td≦{CLOUD_RIME_SPREAD_MAX:g}℃"
+    if not temps:
+        return {"rime_type": RIME_TYPE_DEFAULT, "grade": None, "grade_label": "判定不能",
+                "probability": None, "met_hours": [], "dawn_run": [], "near_miss": None,
+                "min_temp": None,
+                "summary_line": f"【雲中型霧氷ルール({rule})】判定不能(データ欠損)"}
+
+    runs, cur = [], []
+    for x in met_times:
+        if cur and _is_next_hour(cur[-1], x):
+            cur.append(x)
+        else:
+            if cur:
+                runs.append(cur)
+            cur = [x]
+    if cur:
+        runs.append(cur)
+    dawn_runs = [r for r in runs if any(x[11:16] in KAMIKOCHI_RIME_DAWN_HOURS for x in r)]
+    dawn_run = [x[11:16] for x in max(dawn_runs, key=len)] if dawn_runs else []
+
+    if len(dawn_run) >= CLOUD_RIME_LONG_RUN_HOURS:
+        grade = "A"
+    elif dawn_run:
+        grade = "B"
+    elif near_miss:
+        grade = "C"
+    else:
+        grade = "D"
+    label, prob = CLOUD_RIME_GRADES[grade]
+
+    min_temp = min(temps)
+    parts = [f"【雲中型霧氷ルール({rule})】判定{grade}: {label}(霧氷の確率目安 {prob})"]
+    if dawn_run:
+        parts.append(f"明け方を含む連続成立 {len(dawn_run)}時間({dawn_run[0]}〜{dawn_run[-1]})")
+    elif met_times:
+        parts.append(f"成立は明け方以外のみ({', '.join(x[11:16] for x in met_times)})")
+    if near_miss and not dawn_run:
+        unit = "℃"
+        parts.append(f"明け方で最も惜しいのは{near_miss['time']}: {near_miss['condition']}があと"
+                     f"{near_miss['shortfall']}{unit}不足 (T:{near_miss['temp']}℃, Td:{near_miss['dew_point']}℃)")
+    if min_temp > CLOUD_RIME_TEMP_MAX:
+        parts.append(f"一晩中{CLOUD_RIME_TEMP_MAX:g}℃を下回らない(最低気温 {min_temp}℃)")
+
+    return {"rime_type": RIME_TYPE_DEFAULT, "grade": grade, "grade_label": label,
+            "probability": prob, "met_hours": [x[11:16] for x in met_times],
+            "dawn_run": dawn_run, "near_miss": near_miss, "min_temp": min_temp,
+            "summary_line": " / ".join(parts)}
 
 
 def _build_summary(spot_name: str, factor: float, hourly: list,

@@ -266,3 +266,57 @@ class TestNoWindCorrectionInAnswers:
     def test_error_result_passes_through(self):
         err = {"spot_name": "x", "error": "timeout"}
         assert _for_llm(err) == err
+
+
+# =============================================
+# check_cloud_rime（雲中型・未確定の霧氷ルール）と、氷点下の前提条件
+# =============================================
+
+from tools.weather import check_cloud_rime
+
+
+class TestCloudRime:
+    def _n(self, T, D):
+        return _wnight(T, D, [50] * 7)
+
+    def test_warm_humid_night_is_d(self):
+        """美ヶ原のケース: 5℃で湿っていても、氷点下にならなければ不成立(10%以下)"""
+        r = check_cloud_rime(self._n([5.2] * 7, [5.0] * 7))
+        assert r["grade"] == "D"
+        assert "一晩中-1℃を下回らない(最低気温 5.2℃)" in r["summary_line"]
+
+    def test_plus_one_degree_is_d(self):
+        """尾瀬ヶ原のケース: 1℃予報なら成立しない"""
+        assert check_cloud_rime(self._n([1.0] * 7, [0.8] * 7))["grade"] == "D"
+
+    def test_in_cloud_cold_night_is_a(self):
+        r = check_cloud_rime(self._n([-5.0] * 7, [-5.5] * 7))
+        assert r["grade"] == "A"
+        assert r["dawn_run"][-1] == "06:00"
+
+    def test_short_dawn_is_b(self):
+        r = check_cloud_rime(self._n([-5.0] * 7, [-9.0] * 5 + [-5.5] * 2))
+        assert r["grade"] == "B"
+
+    def test_near_miss_at_dawn_is_c(self):
+        r = check_cloud_rime(self._n([-5.0] * 7, [-7.0] * 7))   # T-Td 2.0 → 0.5不足
+        assert r["grade"] == "C"
+        assert r["near_miss"]["condition"] == "T-Td"
+
+    def test_dry_night_is_d(self):
+        assert check_cloud_rime(self._n([-8.0] * 7, [-15.0] * 7))["grade"] == "D"
+
+
+class TestSpringFreezingPrecondition:
+    def test_warm_dry_night_is_not_met(self):
+        """露点・下層雲・風速がそろっても、氷点下でなければ成立しない"""
+        rows = _night(**{f"h{h}": GOOD for h in ["03", "04", "05", "06"]})
+        for r in rows:
+            r["temp"] = 3.3
+        res = check_kamikochi_rime(rows)
+        assert res["grade"] == "E"
+        assert "一晩中氷点下にならない(最低気温 3.3℃)" in res["summary_line"]
+
+    def test_below_freezing_still_met(self):
+        res = check_kamikochi_rime(_night(h03=GOOD, h04=GOOD, h05=GOOD, h06=GOOD))
+        assert res["grade"] == "A"   # 既定の気温 -8℃ なので従来どおり

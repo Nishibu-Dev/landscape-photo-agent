@@ -131,6 +131,7 @@ from config.spots import (
 class TestRimeType:
     def test_wetland_spots(self):
         assert get_rime_type("田ノ原湿原") == RIME_TYPE_WETLAND
+        assert get_rime_type("尾瀬") == RIME_TYPE_WETLAND     # 尾瀬ヶ原のエイリアス
         assert get_rime_type("霧ヶ峰") == RIME_TYPE_WETLAND   # 踊場湿原のエイリアス
 
     def test_spring_spots(self):

@@ -24,7 +24,15 @@ class TestExplainSpotLogic:
         assert "河童橋(上高地)" in r["text"] and "湧水型" in r["text"]
 
     def test_default_type(self):
-        assert "共通条件" in explain_spot_logic("美ヶ原")["text"]
+        text = explain_spot_logic("美ヶ原")["text"]
+        assert "雲中型・未確定" in text
+        assert f"気温 ≦ {w.CLOUD_RIME_TEMP_MAX:g}℃" in text and "ガス(雲中)と同じ向き" in text
+
+    def test_spring_has_freezing_precondition(self):
+        assert "前提条件: 気温 ≦ 0℃" in explain_spot_logic("上高地")["text"]
+
+    def test_oze_is_wetland(self):
+        assert "湿原・盆地型" in explain_spot_logic("尾瀬ヶ原")["text"]
 
     def test_unknown_spot(self):
         r = explain_spot_logic("女神湖")

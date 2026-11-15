@@ -51,13 +51,14 @@ def _rime_logic_lines(rime_type: str) -> list[str]:
         m = w.KAMIKOCHI_NEAR_MISS_MARGIN
         lines += [
             "■霧氷の判定(Pythonで機械判定。1時間ごと)",
+            f"  前提条件: 気温 ≦ {w.KAMIKOCHI_RIME_TEMP_MAX:g}℃(氷点下でなければ枝で凍らない)",
             f"  成立条件: 露点 ≦ {w.KAMIKOCHI_RIME_DEWPOINT_MAX:g}℃ かつ 下層雲 < {w.KAMIKOCHI_RIME_CLOUD_LOW_MAX:g}% "
             f"かつ 風速 ≦ {w.KAMIKOCHI_RIME_WIND_MAX:g}m/s(強いと霧氷が飛ばされる)",
             f"  夜全体: {w.KAMIKOCHI_RIME_LONG_RUN_HOURS}時間以上の連続成立と、明け方"
             f"({'・'.join(h[:2] + '時' for h in w.KAMIKOCHI_RIME_DAWN_HOURS)})の成立を重視",
             f"  「惜しい」: 1条件だけが、露点{m['露点']:g}℃・下層雲{m['下層雲']:g}ポイント・風速{m['風速']:g}m/s 以内で足りない",
             *_grades_text(w.KAMIKOCHI_RIME_GRADES),
-            "  根拠: 上高地の過去7夜の実績(霧氷あり・少しあり・なし)。気温では霧氷のあり・なしが分かれなかった",
+            "  根拠: 上高地の過去7夜の実績(霧氷あり・少しあり・なし)。氷点下の範囲では、気温の高低で霧氷のあり・なしが分かれなかった",
         ]
     elif rime_type == RIME_TYPE_WETLAND:
         m = w.WETLAND_NEAR_MISS_MARGIN
@@ -72,12 +73,18 @@ def _rime_logic_lines(rime_type: str) -> list[str]:
             f"  乾いていく夜: 0時→6時で T-Td が {w.WETLAND_RIME_DRYING_SPREAD:g}℃ 以上広がったら"
             f" {w.WETLAND_RIME_DRYING_DOWNGRADE_STEPS}段階格下げ",
             *_grades_text(w.WETLAND_RIME_GRADES),
-            "  根拠: 田ノ原湿原5夜・踊場湿原3夜の実績。気温では霧氷のあり・なしが分かれなかった",
+            "  根拠: 田ノ原湿原5夜・踊場湿原3夜の実績(尾瀬ヶ原も同じ仕組みの盆地の湿原として適用)。"
+            "氷点下の範囲では、気温の高低で霧氷のあり・なしが分かれなかった",
         ]
     else:
+        m = w.CLOUD_NEAR_MISS_MARGIN
         lines += [
-            "■霧氷の判定(LLMが判定)",
-            "  共通条件: 気温 ≦ -1℃ かつ T-Td ≦ 1.5℃(ほぼ飽和)",
+            "■霧氷の判定(Pythonで機械判定。1時間ごと)",
+            f"  成立条件: 気温 ≦ {w.CLOUD_RIME_TEMP_MAX:g}℃ かつ T-Td ≦ {w.CLOUD_RIME_SPREAD_MAX:g}℃(ほぼ飽和)",
+            f"  夜全体: 明け方を含む連続成立が{w.CLOUD_RIME_LONG_RUN_HOURS}時間以上かどうかで判定",
+            f"  「惜しい」: 明け方の時刻に、1条件だけが気温{m['気温']:g}℃・T-Td {m['T-Td']:g}℃ 以内で足りない",
+            *_grades_text(w.CLOUD_RIME_GRADES),
+            "  尾根沿いの地点では、霧氷はガス(雲中)と同じ向きに見積もる(雲の上に出ている雲海の朝は出にくい)",
         ]
     lines.append("  ※閾値は暫定値。今期の実績で見直す予定")
     return lines
@@ -91,7 +98,7 @@ def _overview() -> dict:
         lines.append(f"  {RIME_TYPE_DESCRIPTION[t]}")
     lines += [
         "■未登録の地点: Google Mapsで座標と標高を調べ、地形タグと霧のパターンをLLMが推定する。"
-        "霧氷は雲中型・未確定として共通条件で判定する",
+        "霧氷は雲中型・未確定として判定する",
         "※霧のパターン(A〜E)は霧の判定専用で、霧氷の判定には使わない",
     ]
     return {"found": True, "text": "\n".join(lines)}
