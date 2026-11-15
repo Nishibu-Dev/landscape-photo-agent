@@ -233,3 +233,36 @@ class TestWetlandRime:
         r = check_wetland_rime(rows)
         assert r["grade"] is None
         assert "判定不能" in r["summary_line"]
+
+
+# =============================================
+# 予測の回答に風速の補正係数を出さない
+# =============================================
+
+from tools.weather import _for_llm, _build_summary
+
+
+class TestNoWindCorrectionInAnswers:
+    HOUR = {"time": "2026-01-16T06:00", "temp": -8.0, "dew_point": -9.0, "humidity": 92,
+            "wind_raw": 5.0, "wind_adjusted": 1.0, "cloud_low": 30, "cloud_mid": 0, "cloud_high": 0}
+
+    def test_summary_has_no_factor_or_raw_wind(self):
+        text = _build_summary("田ノ原湿原", 0.1, [self.HOUR], 0.0)
+        assert "W:1.0m/s" in text
+        for word in ("補正", "係数", "生値", "5.0m/s"):
+            assert word not in text
+
+    def test_llm_result_has_only_judgement_wind(self):
+        r = _for_llm({"spot_name": "田ノ原湿原", "hourly": [self.HOUR], "summary": "x"})
+        h = r["hourly"][0]
+        assert h["wind"] == 1.0
+        assert "wind_raw" not in h and "wind_adjusted" not in h
+
+    def test_original_result_is_kept_for_records(self):
+        original = {"spot_name": "田ノ原湿原", "hourly": [self.HOUR]}
+        _for_llm(original)
+        assert original["hourly"][0]["wind_raw"] == 5.0   # 記録用の元データは変更しない
+
+    def test_error_result_passes_through(self):
+        err = {"spot_name": "x", "error": "timeout"}
+        assert _for_llm(err) == err

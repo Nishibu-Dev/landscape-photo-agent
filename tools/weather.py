@@ -76,6 +76,22 @@ def _build_target_times(base_date_str: str) -> list[str]:
     return evening + morning
 
 
+def _for_llm(result: dict) -> dict:
+    """
+    エージェント(LLM)に返す形に整える。予測の記録には全項目を残すが、回答で
+    風速の補正係数や補正前の値に触れないよう、LLMには判定用の風速だけを渡す。
+    """
+    if not isinstance(result, dict) or "hourly" not in result:
+        return result
+    out = dict(result)
+    out["hourly"] = [
+        {k: v for k, v in h.items() if k not in ("wind_raw", "wind_adjusted")}
+        | {"wind": h.get("wind_adjusted")}
+        for h in result["hourly"]
+    ]
+    return out
+
+
 async def fetch_forecast(lat: float, lng: float, spot_name: str,
                          save_snapshot: bool = True,
                          target_offset_days: int = 1) -> dict:
@@ -89,6 +105,14 @@ async def fetch_forecast(lat: float, lng: float, spot_name: str,
     False で呼び、呼び出し側が最後にまとめて1回だけ保存する。
     翌々日予測(target_offset_days=2)では精度検証対象外のため保存しない。
     """
+    result = await _fetch_forecast_full(lat, lng, spot_name, save_snapshot, target_offset_days)
+    return _for_llm(result)
+
+
+async def _fetch_forecast_full(lat: float, lng: float, spot_name: str,
+                               save_snapshot: bool = True,
+                               target_offset_days: int = 1) -> dict:
+    """fetch_forecast の本体。記録用に全項目(補正前の風速を含む)を返す。"""
     params = {
         "latitude": lat,
         "longitude": lng,
@@ -230,7 +254,7 @@ async def fetch_all_forecasts(user_input: str, target_offset_days: int = 1) -> l
         if delay > 0:
             await asyncio.sleep(delay)
         try:
-            return await fetch_forecast(
+            return await _fetch_forecast_full(
                 lat=spot["lat"],
                 lng=spot["lng"],
                 spot_name=spot["name"],
@@ -263,7 +287,7 @@ async def fetch_all_forecasts(user_input: str, target_offset_days: int = 1) -> l
     if target_offset_days == 1:
         await _save_prediction_snapshots_bulk(results)
 
-    return results
+    return [_for_llm(r) for r in results]
 
 
 async def fetch_historical_weather(
@@ -514,7 +538,7 @@ def check_spring_rime(hourly: list[dict]) -> dict:
     label, prob = KAMIKOCHI_RIME_GRADES[grade]
 
     rule = (f"露点≦{KAMIKOCHI_RIME_DEWPOINT_MAX:g}℃・下層雲<{KAMIKOCHI_RIME_CLOUD_LOW_MAX:g}%・"
-            f"風速(補正後)≦{KAMIKOCHI_RIME_WIND_MAX:g}m/s")
+            f"風速≦{KAMIKOCHI_RIME_WIND_MAX:g}m/s")
     head = f"【湧水型霧氷ルール({rule})】判定{grade}: {label}(霧氷の確率目安 {prob})"
     if not has_data:
         line = f"【湧水型霧氷ルール({rule})】判定不能(データ欠損)"
@@ -694,7 +718,7 @@ def check_wetland_rime(hourly: list[dict]) -> dict:
 
 def _build_summary(spot_name: str, factor: float, hourly: list,
                    prev_day_precip: float = 0.0) -> str:
-    lines = [f"■{spot_name}（風速補正係数: x{factor}）"]
+    lines = [f"■{spot_name}"]
     # 前日降水はパターンC判定の材料になるため明示
     lines.append(f"[前日降水量(当日0-20時)合計: {prev_day_precip}mm]")
     for h in hourly:
@@ -704,7 +728,7 @@ def _build_summary(spot_name: str, factor: float, hourly: list,
             f"{h['time']}: "
             f"T:{h['temp']}℃, Td:{h['dew_point']}℃, T-Td:{t_td}℃, "
             f"H:{h['humidity']}%, "
-            f"W:{h['wind_adjusted']}m/s(補正後/{h['wind_raw']}m/s生値), "
+            f"W:{h['wind_adjusted']}m/s, "
             f"C_Low:{h['cloud_low']}%, C_Mid:{h['cloud_mid']}%, C_High:{h['cloud_high']}%"
         )
     return "\n".join(lines)
