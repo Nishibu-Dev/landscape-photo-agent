@@ -494,7 +494,7 @@ def _sum_prev_day_precip(hourly: dict, target_today_str: str) -> float:
 
 # ---------------------------------------------------------------------------
 # 湧水型の霧氷ルール(田代湿原・河童橋など上高地エリア)
-#   露点 ≦ -15℃ かつ 下層雲 < 10% かつ 風速(補正後) ≦ 2.5m/s が同じ時刻にそろえば成立。
+#   露点 ≦ -15℃ かつ 下層雲 < 10% かつ 風速(補正後) ≦ 2.0m/s が同じ時刻にそろえば成立。
 #   - 気温は判定に使わない(実績では霧氷あり/なしを分けなかったため。参考表示のみ)
 #   - 下層雲: 強い冷え込みでは湿った空気でも露点が下がるため、
 #     「冷えているだけで湿った(雲のある)夜」を除外する役割
@@ -504,7 +504,9 @@ def _sum_prev_day_precip(hourly: dict, target_today_str: str) -> float:
 # ---------------------------------------------------------------------------
 KAMIKOCHI_RIME_DEWPOINT_MAX = -15.0   # 露点(℃) これ以下
 KAMIKOCHI_RIME_CLOUD_LOW_MAX = 10.0   # 下層雲(%) これ未満
-KAMIKOCHI_RIME_WIND_MAX = 2.5         # 風速 補正後(m/s) これ以下
+KAMIKOCHI_RIME_WIND_MAX = 2.0         # 風速 補正後(m/s) これ以下
+#   ※以前は2.5だったが、過去の上高地の夜は補正後0.6m/s以下で、2.5は補正前の値の範囲から決めた
+#     可能性が高い(実質効いていなかった)。湿原・盆地型とそろえて2.0にした(暫定)。
 KAMIKOCHI_RIME_TEMP_MAX = 0.0         # 前提条件: 気温(℃) これ以下(氷点下でなければ枝で凍らない)
 KAMIKOCHI_RIME_LONG_RUN_HOURS = 3     # この時間以上の連続成立で「長時間」
 KAMIKOCHI_RIME_DAWN_HOURS = ("04:00", "05:00", "06:00")  # 明け方(撮影時間帯)
@@ -533,6 +535,35 @@ def _kamikochi_gaps(td: float, cl: float, w: float) -> dict:
 def _is_next_hour(prev_time: str, time: str) -> bool:
     fmt = "%Y-%m-%dT%H:%M"
     return datetime.strptime(time, fmt) - datetime.strptime(prev_time, fmt) == timedelta(hours=1)
+
+
+# ---------------------------------------------------------------------------
+# 全タイプ共通: 一晩中氷点下にならない夜は霧氷 0%
+#   氷点下にならなければ枝で凍らないため、どのタイプでも霧氷はできない。
+#   「20%以下」「10%以下」のように期待させる幅を出さず、判定0(0%)とする。
+#   0.0℃ちょうどは氷点下扱い(湧水型の前提条件「気温≦0℃」と同じ境界)。
+# ---------------------------------------------------------------------------
+RIME_FREEZE_TEMP = 0.0
+RIME_NO_FREEZE_GRADE = ("一晩中氷点下にならない", "0%")
+
+
+def _min_temp(hourly: list[dict]) -> float | None:
+    temps = [h.get("temp") for h in hourly if h.get("temp") is not None]
+    return min(temps) if temps else None
+
+
+def _apply_no_freeze(result: dict, head: str, min_temp: float | None) -> dict:
+    """最低気温が氷点下にならない夜は、判定を 判定0(0%) に置き換える。データ欠損(grade=None)はそのまま。"""
+    if result.get("grade") is None or min_temp is None or min_temp <= RIME_FREEZE_TEMP:
+        return result
+    label, prob = RIME_NO_FREEZE_GRADE
+    out = dict(result)
+    out.update({
+        "grade": "0", "grade_label": label, "probability": prob, "min_temp": min_temp,
+        "summary_line": (f"{head}判定0: {label}(最低気温 {min_temp}℃)ため霧氷はできない"
+                         f"(霧氷の確率 {prob})"),
+    })
+    return out
 
 
 def check_spring_rime(hourly: list[dict]) -> dict:
@@ -622,12 +653,10 @@ def check_spring_rime(hourly: list[dict]) -> dict:
                 f"参考T:{near_miss['temp']}℃)")
     else:
         line = head
-    if has_data and min_temp is not None and min_temp > KAMIKOCHI_RIME_TEMP_MAX:
-        line += f" / 一晩中氷点下にならない(最低気温 {min_temp}℃)ため霧氷はできない"
-
-    return {"rime_type": RIME_TYPE_SPRING, "min_temp": min_temp, "grade": grade, "grade_label": label, "probability": prob,
-            "met_hours": [t[11:16] for t in met_times],
-            "longest_run": longest_hhmm, "near_miss": near_miss, "summary_line": line}
+    result = {"rime_type": RIME_TYPE_SPRING, "min_temp": min_temp, "grade": grade, "grade_label": label,
+              "probability": prob, "met_hours": [t[11:16] for t in met_times],
+              "longest_run": longest_hhmm, "near_miss": near_miss, "summary_line": line}
+    return _apply_no_freeze(result, f"【湧水型霧氷ルール({rule})】", min_temp)
 
 
 # 互換のため旧名も残す
@@ -640,7 +669,9 @@ check_kamikochi_rime = check_spring_rime
 #     気温 ≦ -2℃ かつ 氷に対する湿度 ≧ 85% かつ 下層雲 ≧ 20%
 #   がそろえば成立。撮影は明け方なので、明け方(4〜6時)の成立を重視する。
 #   さらに、0時→6時で T-Td が 1℃以上広がった夜(乾いていく夜)は1段階格下げする。
-#   - 風速の上限は設けない(実績では風の強い夜にも霧氷が出ている)
+#   - 風速(補正後)は 2.0m/s 以下。以前は「風の強い夜にも霧氷が出ている」として上限なしにしていたが、
+#     それは補正前の値(田ノ原で6〜10m/s)の話で、補正後に直すと霧氷ありの夜は最大でも約1.4m/s(踊場)。
+#     データの範囲を大きく超える強風(戦場ヶ原で補正後6m/s超など)を成立させないため上限を入れた(暫定)。
 #   - 湿度は水ではなく氷に対する値で見る(氷点下では、水に対して飽和に近い空気は
 #     氷に対しては過飽和になり、枝に霧氷が積もり続けるため)
 #   閾値は田ノ原5夜・踊場湿原3夜の実績から決めた暫定値。今期の実績で見直す。
@@ -648,11 +679,12 @@ check_kamikochi_rime = check_spring_rime
 WETLAND_RIME_TEMP_MAX = -2.0          # 気温(℃) これ以下
 WETLAND_RIME_RHICE_MIN = 85.0         # 氷に対する湿度(%) これ以上
 WETLAND_RIME_CLOUD_LOW_MIN = 20.0     # 下層雲(%) これ以上
+WETLAND_RIME_WIND_MAX = 2.0           # 風速 補正後(m/s) これ以下(暫定)
 WETLAND_RIME_LONG_RUN_HOURS = 3       # 明け方を含む連続成立がこの時間以上で判定A
 WETLAND_RIME_DRYING_SPREAD = 1.0      # 0時→6時で T-Td がこれ以上広がったら格下げ
 WETLAND_RIME_DRYING_DOWNGRADE_STEPS = 1  # 乾いていく夜に何段階下げるか
 # 「惜しい」: 明け方の時刻に、1条件だけがこの幅以内で足りない
-WETLAND_NEAR_MISS_MARGIN = {"氷に対する湿度": 5.0, "下層雲": 10.0, "気温": 1.0}
+WETLAND_NEAR_MISS_MARGIN = {"氷に対する湿度": 5.0, "下層雲": 10.0, "気温": 1.0, "風速": 0.5}
 
 WETLAND_RIME_GRADES = {
     "A": ("成立・明け方まで3時間以上継続", "80〜90%"),
@@ -670,12 +702,13 @@ def rh_ice(temp: float, dew_point: float) -> float:
     return 100.0 * e / e_ice
 
 
-def _wetland_gaps(t: float, td: float, cl: float) -> dict:
+def _wetland_gaps(t: float, td: float, cl: float, w: float) -> dict:
     rhi = rh_ice(t, td)
     return {
         "気温": round(max(0.0, t - WETLAND_RIME_TEMP_MAX), 1),
         "氷に対する湿度": round(max(0.0, WETLAND_RIME_RHICE_MIN - rhi), 1),
         "下層雲": round(max(0.0, WETLAND_RIME_CLOUD_LOW_MIN - cl), 1),
+        "風速": round(max(0.0, w - WETLAND_RIME_WIND_MAX), 1),
     }
 
 
@@ -696,13 +729,14 @@ def check_wetland_rime(hourly: list[dict]) -> dict:
     spread_at = {}
     for h in hourly:
         t, td, cl = h.get("temp"), h.get("dew_point"), h.get("cloud_low")
-        if t is None or td is None or cl is None:
+        w = h.get("wind_adjusted") if h.get("wind_adjusted") is not None else h.get("wind")
+        if t is None or td is None or cl is None or w is None:
             continue
         has_data = True
         hhmm = h["time"][11:16]
         if hhmm in ("00:00", "06:00"):
             spread_at[hhmm] = t - td
-        gaps = _wetland_gaps(t, td, cl)
+        gaps = _wetland_gaps(t, td, cl, w)
         short = {k: v for k, v in gaps.items() if v > 0}
         if not short:
             met_times.append(h["time"])
@@ -716,10 +750,10 @@ def check_wetland_rime(hourly: list[dict]) -> dict:
                     near_miss_score = score
                     near_miss = {"time": hhmm, "condition": name, "shortfall": gap,
                                  "temp": t, "dew_point": td, "cloud_low": cl,
-                                 "rh_ice": round(rh_ice(t, td))}
+                                 "rh_ice": round(rh_ice(t, td)), "wind_adjusted": w}
 
     rule = (f"気温≦{WETLAND_RIME_TEMP_MAX:g}℃・氷に対する湿度≧{WETLAND_RIME_RHICE_MIN:g}%・"
-            f"下層雲≧{WETLAND_RIME_CLOUD_LOW_MIN:g}%")
+            f"下層雲≧{WETLAND_RIME_CLOUD_LOW_MIN:g}%・風速≦{WETLAND_RIME_WIND_MAX:g}m/s")
     if not has_data:
         return {"rime_type": RIME_TYPE_WETLAND, "grade": None, "grade_label": "判定不能",
                 "probability": None, "met_hours": [], "dawn_run": [], "near_miss": None,
@@ -768,10 +802,16 @@ def check_wetland_rime(hourly: list[dict]) -> dict:
     elif met_times:
         parts.append(f"成立は明け方以外のみ({', '.join(x[11:16] for x in met_times)})")
     if near_miss and not dawn_run:
-        unit = {"氷に対する湿度": "%", "下層雲": "%", "気温": "℃"}[near_miss["condition"]]
+        unit = {"氷に対する湿度": "%", "下層雲": "%", "気温": "℃", "風速": "m/s"}[near_miss["condition"]]
         parts.append(f"明け方で最も惜しいのは{near_miss['time']}: {near_miss['condition']}があと"
                      f"{near_miss['shortfall']}{unit}不足 (T:{near_miss['temp']}℃, "
-                     f"氷に対する湿度:{near_miss['rh_ice']}%, 下層雲:{near_miss['cloud_low']}%)")
+                     f"氷に対する湿度:{near_miss['rh_ice']}%, 下層雲:{near_miss['cloud_low']}%, "
+                     f"W:{near_miss['wind_adjusted']}m/s)")
+    dawn_winds = [h.get("wind_adjusted") if h.get("wind_adjusted") is not None else h.get("wind")
+                  for h in hourly if h["time"][11:16] in KAMIKOCHI_RIME_DAWN_HOURS]
+    dawn_winds = [x for x in dawn_winds if x is not None]
+    if dawn_winds and max(dawn_winds) > WETLAND_RIME_WIND_MAX:
+        parts.append(f"明け方の風速 最大{max(dawn_winds)}m/s(上限{WETLAND_RIME_WIND_MAX:g}m/sを超える強風)")
     temps = [h.get("temp") for h in hourly if h.get("temp") is not None]
     if temps and min(temps) > WETLAND_RIME_TEMP_MAX:
         parts.append(f"一晩中{WETLAND_RIME_TEMP_MAX:g}℃を下回らない(最低気温 {min(temps)}℃)")
@@ -782,10 +822,12 @@ def check_wetland_rime(hourly: list[dict]) -> dict:
                     f"格下げ前は判定{base_grade})")
         parts.append(txt)
 
-    return {"rime_type": RIME_TYPE_WETLAND, "grade": grade, "grade_label": label,
-            "probability": prob, "met_hours": [x[11:16] for x in met_times],
-            "dawn_run": dawn_run, "near_miss": near_miss, "spread_change": spread_change,
-            "downgraded": downgraded, "summary_line": " / ".join(parts)}
+    result = {"rime_type": RIME_TYPE_WETLAND, "grade": grade, "grade_label": label,
+              "probability": prob, "met_hours": [x[11:16] for x in met_times],
+              "dawn_run": dawn_run, "near_miss": near_miss, "spread_change": spread_change,
+              "downgraded": downgraded, "min_temp": _min_temp(hourly),
+              "summary_line": " / ".join(parts)}
+    return _apply_no_freeze(result, f"【湿原霧氷ルール({rule})】", _min_temp(hourly))
 
 
 # ---------------------------------------------------------------------------
@@ -801,6 +843,11 @@ CLOUD_RIME_TEMP_MAX = -1.0            # 気温(℃) これ以下
 CLOUD_RIME_SPREAD_MAX = 1.5           # T-Td(℃) これ以下
 CLOUD_RIME_LONG_RUN_HOURS = 3
 CLOUD_NEAR_MISS_MARGIN = {"気温": 1.0, "T-Td": 0.5}
+# 雲中型は風を上限にしない(雲の粒が枝にぶつかって凍るため、風はむしろ霧氷を育てる)。
+# その代わり、明け方の風速(補正後)がこれを超える夜は、繊細な霧氷ではなく
+# 風上側に伸びる樹氷(エビのしっぽ)になりやすいことを判定行に添える。確率は変えない。
+CLOUD_RIME_STRONG_WIND = 2.0
+CLOUD_RIME_STRONG_WIND_FORM = "樹氷(エビのしっぽ)"
 
 CLOUD_RIME_GRADES = {
     "A": ("成立・明け方まで3時間以上継続", "60〜80%"),
@@ -890,10 +937,29 @@ def check_cloud_rime(hourly: list[dict]) -> dict:
     if min_temp > CLOUD_RIME_TEMP_MAX:
         parts.append(f"一晩中{CLOUD_RIME_TEMP_MAX:g}℃を下回らない(最低気温 {min_temp}℃)")
 
-    return {"rime_type": RIME_TYPE_DEFAULT, "grade": grade, "grade_label": label,
-            "probability": prob, "met_hours": [x[11:16] for x in met_times],
-            "dawn_run": dawn_run, "near_miss": near_miss, "min_temp": min_temp,
-            "summary_line": " / ".join(parts)}
+    # 強風の朝は、できるとしても樹氷(エビのしっぽ)寄り。成立〜惜しい(A〜C)のときだけ添える。
+    # 風速は、成立していれば明け方(4〜6時)のうち成立した時刻、そうでなければ明け方全体の最大を見る。
+    form = None
+    max_wind = None
+    if grade in ("A", "B", "C"):
+        dawn = set(KAMIKOCHI_RIME_DAWN_HOURS)
+        check_hours = (set(dawn_run) & dawn) if dawn_run else dawn
+        winds = [h.get("wind_adjusted") if h.get("wind_adjusted") is not None else h.get("wind")
+                 for h in hourly if h["time"][11:16] in check_hours]
+        winds = [x for x in winds if x is not None]
+        if winds:
+            max_wind = max(winds)
+            if max_wind > CLOUD_RIME_STRONG_WIND:
+                form = CLOUD_RIME_STRONG_WIND_FORM
+                parts.append(f"明け方の風速 最大{max_wind}m/s({CLOUD_RIME_STRONG_WIND:g}m/s超の強風): "
+                             f"できるとしても繊細な霧氷より、風上側に伸びる{form}になりやすい")
+
+    result = {"rime_type": RIME_TYPE_DEFAULT, "grade": grade, "grade_label": label,
+              "probability": prob, "met_hours": [x[11:16] for x in met_times],
+              "dawn_run": dawn_run, "near_miss": near_miss, "min_temp": min_temp,
+              "dawn_max_wind": max_wind, "rime_form": form,
+              "summary_line": " / ".join(parts)}
+    return _apply_no_freeze(result, f"【雲中型霧氷ルール({rule})】", min_temp)
 
 
 def _build_summary(spot_name: str, factor: float, hourly: list,

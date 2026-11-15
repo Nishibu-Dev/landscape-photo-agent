@@ -25,3 +25,9 @@ class TestForecastInstruction:
     def test_unknown_spot_passes_terrain_for_rime(self):
         assert "main_group と tags を" in INS and "fetch_forecast" in INS
         assert "湧水型は推定しない" in INS
+
+    def test_no_freeze_is_zero(self):
+        assert "判定0（一晩中氷点下にならない）は、どのタイプでも霧氷 0% と出すこと" in INS
+
+    def test_ebi_note_for_strong_wind(self):
+        assert "樹氷(エビのしっぽ)になりやすい" in INS and "確率は判定行どおりのまま" in INS

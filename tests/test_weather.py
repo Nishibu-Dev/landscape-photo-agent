@@ -118,7 +118,7 @@ class TestKamikochiRime:
         assert len(r["longest_run"]) == 1
 
     def test_boundary_values_are_met(self):
-        r = check_kamikochi_rime(_night(h06=(-15.0, 9, 2.5)))
+        r = check_kamikochi_rime(_night(h06=(-15.0, 9, 2.0)))
         assert r["met_hours"] == ["06:00"]
 
     def test_temperature_is_not_used(self):
@@ -140,12 +140,12 @@ class TestKamikochiRime:
 
     def test_shortfall_beyond_margin_is_not_near_miss(self):
         assert check_kamikochi_rime(_night(h06=(-12.5, 0, 1.0)))["grade"] == "E"   # 露点2.5℃不足
-        assert check_kamikochi_rime(_night(h06=(-20.0, 0, 3.1)))["grade"] == "E"   # 風速0.6不足
+        assert check_kamikochi_rime(_night(h06=(-20.0, 0, 2.6)))["grade"] == "E"   # 風速0.6不足
         assert check_kamikochi_rime(_night(h06=(-20.0, 20, 1.0)))["grade"] == "E"  # 下層雲11不足
 
     def test_shortfall_within_margin_each_condition(self):
         assert check_kamikochi_rime(_night(h06=(-13.0, 0, 1.0)))["grade"] == "D"   # 露点2.0℃不足
-        assert check_kamikochi_rime(_night(h06=(-20.0, 0, 3.0)))["grade"] == "D"   # 風速0.5不足
+        assert check_kamikochi_rime(_night(h06=(-20.0, 0, 2.5)))["grade"] == "D"   # 風速0.5不足
         assert check_kamikochi_rime(_night(h06=(-20.0, 19, 1.0)))["grade"] == "D"  # 下層雲10不足
 
     def test_missing_data(self):
@@ -164,11 +164,12 @@ class TestKamikochiRime:
 from tools.weather import check_wetland_rime, rh_ice
 
 
-def _wnight(T, D, C):
-    """0〜6時の7時間分。T=気温, D=露点, C=下層雲 のリスト。"""
+def _wnight(T, D, C, W=None):
+    """0〜6時の7時間分。T=気温, D=露点, C=下層雲, W=風速(補正後。省略時は1.0) のリスト。"""
     hrs = ["00", "01", "02", "03", "04", "05", "06"]
+    W = W or [1.0] * 7
     return [{"time": f"2026-01-16T{h}:00", "temp": t, "dew_point": d,
-             "cloud_low": c, "wind_adjusted": 5.0} for h, t, d, c in zip(hrs, T, D, C)]
+             "cloud_low": c, "wind_adjusted": w} for h, t, d, c, w in zip(hrs, T, D, C, W)]
 
 
 class TestRhIce:
@@ -189,9 +190,20 @@ class TestWetlandRime:
         assert r["grade"] == "A"
         assert r["dawn_run"][-1] == "06:00"
 
-    def test_strong_wind_does_not_block(self):
-        r = check_wetland_rime(_wnight([-9.0] * 7, [-11.0] * 7, [30] * 7))
-        assert r["grade"] == "A"   # 風速5.0でも成立(上限なし)
+    def test_strong_wind_blocks(self):
+        """戦場ヶ原のケース: 補正後6m/sの強風なら、湿っていて寒くても成立しない"""
+        r = check_wetland_rime(_wnight([-9.0] * 7, [-11.0] * 7, [30] * 7, [6.0] * 7))
+        assert r["grade"] == "D"
+        assert "明け方の風速 最大6.0m/s(上限2m/sを超える強風)" in r["summary_line"]
+
+    def test_wind_at_limit_is_met(self):
+        r = check_wetland_rime(_wnight([-9.0] * 7, [-11.0] * 7, [30] * 7, [2.0] * 7))
+        assert r["grade"] == "A"
+
+    def test_slightly_strong_wind_is_near_miss(self):
+        r = check_wetland_rime(_wnight([-9.0] * 7, [-11.0] * 7, [30] * 7, [2.4] * 7))
+        assert r["grade"] == "C"
+        assert r["near_miss"]["condition"] == "風速"
 
     def test_clearing_and_drying_night_is_grade_d(self):
         """晴れていき乾いていった夜(田ノ原・霧氷なし): 惜しいC → 乾燥化で格下げ D"""
@@ -279,15 +291,20 @@ class TestCloudRime:
     def _n(self, T, D):
         return _wnight(T, D, [50] * 7)
 
-    def test_warm_humid_night_is_d(self):
-        """美ヶ原のケース: 5℃で湿っていても、氷点下にならなければ不成立(10%以下)"""
+    def test_warm_humid_night_is_zero(self):
+        """美ヶ原のケース: 5℃で湿っていても、氷点下にならなければ霧氷 0%"""
         r = check_cloud_rime(self._n([5.2] * 7, [5.0] * 7))
-        assert r["grade"] == "D"
-        assert "一晩中-1℃を下回らない(最低気温 5.2℃)" in r["summary_line"]
+        assert r["grade"] == "0" and r["probability"] == "0%"
+        assert "一晩中氷点下にならない(最低気温 5.2℃)" in r["summary_line"]
 
-    def test_plus_one_degree_is_d(self):
-        """尾瀬ヶ原のケース: 1℃予報なら成立しない"""
-        assert check_cloud_rime(self._n([1.0] * 7, [0.8] * 7))["grade"] == "D"
+    def test_plus_one_degree_is_zero(self):
+        """尾瀬ヶ原のケース: 1℃予報なら霧氷 0%"""
+        assert check_cloud_rime(self._n([1.0] * 7, [0.8] * 7))["probability"] == "0%"
+
+    def test_below_freezing_but_above_minus_one_is_not_zero(self):
+        """氷点下にはなるが -1℃ を下回らない夜は 0% にせず、これまでどおりの判定(ここでは惜しい)"""
+        r = check_cloud_rime(self._n([-0.5] * 7, [-0.7] * 7))
+        assert r["grade"] == "C"
 
     def test_in_cloud_cold_night_is_a(self):
         r = check_cloud_rime(self._n([-5.0] * 7, [-5.5] * 7))
@@ -314,8 +331,16 @@ class TestSpringFreezingPrecondition:
         for r in rows:
             r["temp"] = 3.3
         res = check_kamikochi_rime(rows)
-        assert res["grade"] == "E"
+        assert res["grade"] == "0" and res["probability"] == "0%"
         assert "一晩中氷点下にならない(最低気温 3.3℃)" in res["summary_line"]
+        assert "20%以下" not in res["summary_line"]
+
+    def test_zero_degree_is_freezing(self):
+        """0.0℃ちょうどは氷点下扱い(前提条件 気温≦0℃ と同じ境界)なので 0% にはしない"""
+        rows = _night(**{f"h{h}": GOOD for h in ["03", "04", "05", "06"]})
+        for r in rows:
+            r["temp"] = 0.0
+        assert check_kamikochi_rime(rows)["grade"] != "0"
 
     def test_below_freezing_still_met(self):
         res = check_kamikochi_rime(_night(h03=GOOD, h04=GOOD, h05=GOOD, h06=GOOD))
@@ -402,3 +427,44 @@ class TestRimeTypeNote:
 
     def test_default_note(self):
         assert "地形の情報がない" in _rime_type_note(RIME_TYPE_DEFAULT, RIME_SOURCE_DEFAULT, {})
+
+
+class TestWetlandNoFreeze:
+    def test_warm_night_is_zero(self):
+        r = check_wetland_rime(_wnight([2.0] * 7, [1.8] * 7, [80] * 7))
+        assert r["grade"] == "0" and r["probability"] == "0%"
+        assert "霧氷の確率 0%" in r["summary_line"]
+
+    def test_missing_data_is_not_zero(self):
+        r = check_wetland_rime(_wnight([None] * 7, [None] * 7, [None] * 7))
+        assert r["grade"] is None
+
+
+class TestCloudRimeStrongWind:
+    @staticmethod
+    def _n(T, D, W):
+        hrs = ["00", "01", "02", "03", "04", "05", "06"]
+        return [{"time": f"2026-01-16T{h}:00", "temp": t, "dew_point": d, "wind_adjusted": w}
+                for h, t, d, w in zip(hrs, T, D, W)]
+
+    def test_strong_wind_suggests_ebi(self):
+        """千畳敷・美ヶ原のケース: 雲の中で強風 → 確率はそのまま、樹氷(エビのしっぽ)寄りと添える"""
+        r = check_cloud_rime(self._n([-8.0] * 7, [-8.5] * 7, [5.0] * 7))
+        assert r["grade"] == "A" and r["probability"] == "60〜80%"
+        assert r["rime_form"] == "樹氷(エビのしっぽ)"
+        assert "エビのしっぽ" in r["summary_line"] and "最大5.0m/s" in r["summary_line"]
+
+    def test_calm_night_has_no_note(self):
+        r = check_cloud_rime(self._n([-8.0] * 7, [-8.5] * 7, [2.0] * 7))
+        assert r["grade"] == "A" and r["rime_form"] is None
+        assert "エビのしっぽ" not in r["summary_line"]
+
+    def test_no_note_when_not_met(self):
+        """不成立(D)なら、強風でもエビのしっぽは添えない"""
+        r = check_cloud_rime(self._n([-8.0] * 7, [-15.0] * 7, [6.0] * 7))
+        assert r["grade"] == "D" and r["rime_form"] is None
+
+    def test_only_dawn_wind_counts(self):
+        """強風が夜中だけで明け方は弱いなら添えない"""
+        r = check_cloud_rime(self._n([-8.0] * 7, [-8.5] * 7, [6.0, 6.0, 6.0, 6.0, 1.0, 1.0, 1.0]))
+        assert r["rime_form"] is None
