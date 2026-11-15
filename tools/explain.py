@@ -40,6 +40,13 @@ RIME_TYPE_DESCRIPTION = {
                        "(タイプが確定していない地点もここ)。",
 }
 
+UNKNOWN_SPOT_RIME_RULE = [
+    "■霧氷のタイプ(未登録の地点): LLMが推定した地形タグから、Pythonが機械的に決める",
+    f"  湿原系×盆地地形(乾燥湿原・稜線上・峠を除く) → {RIME_TYPE_WETLAND}",
+    f"  それ以外 → {RIME_TYPE_DEFAULT}",
+    f"  {RIME_TYPE_SPRING}は推定しない(凍らない湧水があるかは地形から分からないため、実績で確かめた登録地点だけ)",
+]
+
 
 def _grades_text(grades: dict) -> list[str]:
     return [f"  判定{k}: {label} → 霧氷 {prob}" for k, (label, prob) in grades.items()]
@@ -98,7 +105,8 @@ def _overview() -> dict:
         lines.append(f"  {RIME_TYPE_DESCRIPTION[t]}")
     lines += [
         "■未登録の地点: Google Mapsで座標と標高を調べ、地形タグと霧のパターンをLLMが推定する。"
-        "霧氷は雲中型・未確定として判定する",
+        f"霧氷は、地形タグが湿原系×盆地地形なら{RIME_TYPE_WETLAND}、それ以外は{RIME_TYPE_DEFAULT}"
+        f"として判定する({RIME_TYPE_SPRING}は推定しない)",
         "※霧のパターン(A〜E)は霧の判定専用で、霧氷の判定には使わない",
     ]
     return {"found": True, "text": "\n".join(lines)}
@@ -132,6 +140,8 @@ def explain_spot_logic(spot_name: str) -> dict:
             "・Google Mapsで座標と標高を調べる",
             "・地名と標高から、LLMが地形タグと霧のパターン(A〜E)を推定し、次回以降のために保存する",
             "・霧: 推定した霧のパターンの基準で判定する",
+            *UNKNOWN_SPOT_RIME_RULE,
+            *_rime_logic_lines(RIME_TYPE_WETLAND),
             *_rime_logic_lines(RIME_TYPE_DEFAULT),
         ]
         return {"found": False, "text": "\n".join(lines)}

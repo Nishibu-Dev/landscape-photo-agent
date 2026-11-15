@@ -38,6 +38,8 @@ class TestExplainSpotLogic:
         r = explain_spot_logic("女神湖")
         assert r["found"] is False
         assert "登録地点ではない" in r["text"] and "雲中型・未確定" in r["text"]
+        assert "湿原系×盆地地形" in r["text"] and "湿原・盆地型" in r["text"]
+        assert "湧水型は推定しない" in r["text"]
 
     def test_overview(self):
         r = explain_spot_logic("全体")

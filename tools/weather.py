@@ -5,7 +5,10 @@ import httpx
 from datetime import datetime, timezone, timedelta
 import math
 from config.adjustments import get_wind_factor
-from config.spots import get_rime_type, RIME_TYPE_WETLAND, RIME_TYPE_SPRING, RIME_TYPE_DEFAULT
+from config.spots import (
+    get_rime_type, get_spot_attributes, estimate_rime_type,
+    RIME_TYPE_WETLAND, RIME_TYPE_SPRING, RIME_TYPE_DEFAULT,
+)
 from tools.logger import get_logger
 
 logger = get_logger(__name__)
@@ -94,24 +97,79 @@ def _for_llm(result: dict) -> dict:
 
 async def fetch_forecast(lat: float, lng: float, spot_name: str,
                          save_snapshot: bool = True,
-                         target_offset_days: int = 1) -> dict:
+                         target_offset_days: int = 1,
+                         main_group: str = "",
+                         tags: list[str] = []) -> dict:
     """
     撮影コンディション予測のため、対象朝の前夜21時〜翌日6時の予報を取得する。
 
     Args:
         target_offset_days: 何日後の朝を対象とするか。1=翌朝(デフォルト)、2=翌々朝。
+        main_group: 未登録地点のとき、classify_spot_group の結果か自分で推定した
+            メイングループ("湿原系" / "高原系")を渡す。霧氷タイプの推定に使う。登録地点は不要。
+        tags: 未登録地点のとき、同じく地形タグのリスト(例: ["盆地地形", "水域近接"])を渡す。
     save_snapshot=True のとき、取得結果を predictions.json に即保存する。
     「おすすめ」一括(fetch_all_forecasts)では並列書き込みの競合を避けるため
     False で呼び、呼び出し側が最後にまとめて1回だけ保存する。
     翌々日予測(target_offset_days=2)では精度検証対象外のため保存しない。
     """
-    result = await _fetch_forecast_full(lat, lng, spot_name, save_snapshot, target_offset_days)
+    result = await _fetch_forecast_full(lat, lng, spot_name, save_snapshot, target_offset_days,
+                                        main_group=main_group, tags=tags)
     return _for_llm(result)
+
+
+RIME_SOURCE_REGISTERED = "登録地点"
+RIME_SOURCE_ESTIMATED = "地形から推定"
+RIME_SOURCE_DEFAULT = "地形不明"
+
+
+async def resolve_rime_type(spot_name: str, main_group: str = "",
+                            tags: list[str] | None = None) -> tuple[str, str, dict]:
+    """
+    霧氷タイプを決める。戻り値は (タイプ, 決め方, 推定に使った地形)。
+
+    1. 登録地点(SPOT_ATTRIBUTES): 登録された rime_type(なければ雲中型・未確定)をそのまま使う。
+    2. 未登録地点で main_group/tags が渡された: estimate_rime_type で推定する。
+    3. 未登録地点で何も渡されなかった: classify_spot_group(Drive の手動シード・自動分類キャッシュ)
+       を引いて推定する。見つからなければ雲中型・未確定。
+    湧水型は登録地点にしか付かない(推定しない)。
+    """
+    if get_spot_attributes(spot_name):
+        return get_rime_type(spot_name), RIME_SOURCE_REGISTERED, {}
+
+    tags = list(tags or [])
+    if not main_group and not tags:
+        try:
+            from tools.location import classify_spot_group
+            info = await classify_spot_group(spot_name)
+        except Exception:
+            logger.warning(f"resolve_rime_type: classify_spot_group failed spot={spot_name}", exc_info=True)
+            info = {}
+        if info.get("found"):
+            main_group = info.get("main_group") or ""
+            tags = list(info.get("tags") or [])
+
+    if not main_group and not tags:
+        return RIME_TYPE_DEFAULT, RIME_SOURCE_DEFAULT, {}
+    terrain = {"main_group": main_group, "tags": tags}
+    return estimate_rime_type(main_group, tags), RIME_SOURCE_ESTIMATED, terrain
+
+
+def _rime_type_note(rime_type: str, source: str, terrain: dict) -> str:
+    """未登録地点で霧氷タイプをどう決めたかを、要約に添える1行。登録地点は空文字。"""
+    if source == RIME_SOURCE_REGISTERED:
+        return ""
+    if source == RIME_SOURCE_DEFAULT:
+        return f"(霧氷タイプ: 地形の情報がないため{rime_type}として判定)"
+    shape = "・".join([terrain.get("main_group") or "", *terrain.get("tags", [])]).strip("・")
+    return f"(霧氷タイプ: 地形({shape})から{rime_type}と推定。登録地点ではないため実績での確認はまだ)"
 
 
 async def _fetch_forecast_full(lat: float, lng: float, spot_name: str,
                                save_snapshot: bool = True,
-                               target_offset_days: int = 1) -> dict:
+                               target_offset_days: int = 1,
+                               main_group: str = "",
+                               tags: list[str] | None = None) -> dict:
     """fetch_forecast の本体。記録用に全項目(補正前の風速を含む)を返す。"""
     params = {
         "latitude": lat,
@@ -171,7 +229,7 @@ async def _fetch_forecast_full(lat: float, lng: float, spot_name: str,
     summary = _build_summary(spot_name, factor, result_hourly, prev_day_precip)
     # 霧氷は全地点をPythonで機械判定し、結果を要約の末尾に1行で明示する
     # (LLMが数値の読み落としや解釈でぶれるのを防ぐため)。タイプごとに判定を切り替える。
-    rime_type = get_rime_type(spot_name)
+    rime_type, rime_source, rime_terrain = await resolve_rime_type(spot_name, main_group, tags)
     if rime_type == RIME_TYPE_SPRING:
         rime_judgement = check_spring_rime(result_hourly)
     elif rime_type == RIME_TYPE_WETLAND:
@@ -179,6 +237,9 @@ async def _fetch_forecast_full(lat: float, lng: float, spot_name: str,
     else:
         rime_judgement = check_cloud_rime(result_hourly)
     summary = summary + "\n" + rime_judgement["summary_line"]
+    rime_note = _rime_type_note(rime_type, rime_source, rime_terrain)
+    if rime_note:
+        summary = summary + "\n" + rime_note
 
     elev = await _resolve_elev(spot_name, lat, lng)
 
@@ -193,6 +254,7 @@ async def _fetch_forecast_full(lat: float, lng: float, spot_name: str,
         "summary":    summary,
     }
     result["rime_type"] = rime_type
+    result["rime_type_source"] = rime_source
     result["rime_judgement"] = {k: v for k, v in rime_judgement.items() if k != "summary_line"}
 
     # 予測スナップショットを predictions.json へ即保存(LLMのsave_prediction呼び出しに依存しない)。
