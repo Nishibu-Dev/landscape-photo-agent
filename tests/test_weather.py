@@ -320,3 +320,85 @@ class TestSpringFreezingPrecondition:
     def test_below_freezing_still_met(self):
         res = check_kamikochi_rime(_night(h03=GOOD, h04=GOOD, h05=GOOD, h06=GOOD))
         assert res["grade"] == "A"   # 既定の気温 -8℃ なので従来どおり
+
+
+# =============================================
+# resolve_rime_type（登録地点 / 未登録地点の霧氷タイプ）
+# =============================================
+
+import asyncio
+import tools.location as location_mod
+from config.spots import RIME_TYPE_WETLAND, RIME_TYPE_SPRING, RIME_TYPE_DEFAULT
+from tools.weather import (
+    resolve_rime_type,
+    _rime_type_note,
+    RIME_SOURCE_REGISTERED,
+    RIME_SOURCE_ESTIMATED,
+    RIME_SOURCE_DEFAULT,
+)
+
+
+def _resolve(*args, **kwargs):
+    return asyncio.run(resolve_rime_type(*args, **kwargs))
+
+
+def _fake_classify(result):
+    async def _f(spot_name):
+        return result
+    return _f
+
+
+class TestResolveRimeType:
+    def test_registered_spot_ignores_passed_terrain(self):
+        # 登録地点は登録どおり。渡された地形では上書きしない
+        t, src, _ = _resolve("上高地", "湿原系", ["盆地地形"])
+        assert (t, src) == (RIME_TYPE_SPRING, RIME_SOURCE_REGISTERED)
+
+    def test_registered_unconfirmed_stays_default(self):
+        # rime_type 未設定の登録地点は、渡された地形にかかわらず雲中型・未確定のまま
+        t, src, _ = _resolve("菅平", "湿原系", ["盆地地形"])
+        assert (t, src) == (RIME_TYPE_DEFAULT, RIME_SOURCE_REGISTERED)
+
+    def test_senjogahara_is_wetland(self):
+        t, src, _ = _resolve("戦場ヶ原")
+        assert (t, src) == (RIME_TYPE_WETLAND, RIME_SOURCE_REGISTERED)
+
+    def test_unknown_with_terrain_is_estimated(self):
+        t, src, terrain = _resolve("八島ヶ原湿原", "湿原系", ["盆地地形", "水域近接"])
+        assert (t, src) == (RIME_TYPE_WETLAND, RIME_SOURCE_ESTIMATED)
+        assert terrain == {"main_group": "湿原系", "tags": ["盆地地形", "水域近接"]}
+
+    def test_unknown_uses_cache_when_terrain_missing(self, monkeypatch):
+        monkeypatch.setattr(location_mod, "classify_spot_group", _fake_classify(
+            {"found": True, "source": "auto", "main_group": "湿原系", "tags": ["盆地地形"]}))
+        t, src, _ = _resolve("八島ヶ原湿原")
+        assert (t, src) == (RIME_TYPE_WETLAND, RIME_SOURCE_ESTIMATED)
+
+    def test_unknown_without_any_terrain_is_default(self, monkeypatch):
+        monkeypatch.setattr(location_mod, "classify_spot_group", _fake_classify({"found": False}))
+        t, src, _ = _resolve("どこかの丘")
+        assert (t, src) == (RIME_TYPE_DEFAULT, RIME_SOURCE_DEFAULT)
+
+    def test_cache_lookup_failure_falls_back(self, monkeypatch):
+        async def _boom(spot_name):
+            raise RuntimeError("drive down")
+        monkeypatch.setattr(location_mod, "classify_spot_group", _boom)
+        t, src, _ = _resolve("どこかの丘")
+        assert (t, src) == (RIME_TYPE_DEFAULT, RIME_SOURCE_DEFAULT)
+
+    def test_unknown_valley_never_spring(self):
+        t, _, _ = _resolve("どこかの渓谷", "高原系", ["谷筋", "水域近接"])
+        assert t == RIME_TYPE_DEFAULT
+
+
+class TestRimeTypeNote:
+    def test_registered_has_no_note(self):
+        assert _rime_type_note(RIME_TYPE_SPRING, RIME_SOURCE_REGISTERED, {}) == ""
+
+    def test_estimated_note_names_terrain(self):
+        note = _rime_type_note(RIME_TYPE_WETLAND, RIME_SOURCE_ESTIMATED,
+                               {"main_group": "湿原系", "tags": ["盆地地形"]})
+        assert "湿原系・盆地地形" in note and "湿原・盆地型と推定" in note
+
+    def test_default_note(self):
+        assert "地形の情報がない" in _rime_type_note(RIME_TYPE_DEFAULT, RIME_SOURCE_DEFAULT, {})

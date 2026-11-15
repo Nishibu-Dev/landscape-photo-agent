@@ -158,7 +158,13 @@ ForecastAgent の instruction に直接埋め込み済み。地形タグとパ�
 resolve_location（Maps API で座標・標高取得、is_unknown=True）
   → classify_spot_group（手動シード → auto_classified キャッシュ → 未分類）
     → 未分類なら LLM がタグ推定 → save_auto_classification でキャッシュ保存
+  → fetch_forecast(main_group, tags を渡す)
+    → resolve_rime_type が霧氷タイプを決める（登録地点は spots.py の rime_type、
+      未登録地点は estimate_rime_type: 湿原系×盆地地形なら湿原・盆地型、それ以外は雲中型・未確定）
 ```
+
+霧氷タイプの湧水型は推定しない（凍らない湧水の有無は地形から分からないため、実績で確かめた登録地点だけに付ける）。
+登録地点で rime_type 未設定の地点は、地形にかかわらず雲中型・未確定のまま（実績で確かめてから付ける方針）。戦場ヶ原は地形から湿原・盆地型と判断して登録済み（今季の実績で見直す）。
 
 ## ローカル開発
 

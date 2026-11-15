@@ -133,13 +133,13 @@ class TestRimeType:
         assert get_rime_type("田ノ原湿原") == RIME_TYPE_WETLAND
         assert get_rime_type("尾瀬") == RIME_TYPE_WETLAND     # 尾瀬ヶ原のエイリアス
         assert get_rime_type("霧ヶ峰") == RIME_TYPE_WETLAND   # 踊場湿原のエイリアス
+        assert get_rime_type("戦場ヶ原") == RIME_TYPE_WETLAND
 
     def test_spring_spots(self):
         assert get_rime_type("上高地") == RIME_TYPE_SPRING
         assert get_rime_type("河童橋") == RIME_TYPE_SPRING
 
     def test_default_for_unconfirmed_and_unknown(self):
-        assert get_rime_type("戦場ヶ原") == RIME_TYPE_DEFAULT
         assert get_rime_type("美ヶ原") == RIME_TYPE_DEFAULT
         assert get_rime_type("女神湖") == RIME_TYPE_DEFAULT
 
@@ -151,3 +151,38 @@ class TestRimeType:
 
     def test_kappabashi_not_in_recommend(self):
         assert all(s["name"] != "河童橋(上高地)" for s in DEFAULT_SPOTS)
+
+
+# =============================================
+# 未登録地点の霧氷タイプ推定
+# =============================================
+
+from config.spots import estimate_rime_type
+
+
+class TestEstimateRimeType:
+    def test_wetland_basin_is_wetland(self):
+        assert estimate_rime_type("湿原系", ["盆地地形", "水域近接"]) == RIME_TYPE_WETLAND
+        assert estimate_rime_type("湿原系", ["盆地地形"]) == RIME_TYPE_WETLAND
+
+    def test_dry_wetland_is_default(self):
+        # 乾燥湿原は明け方まで湿り気が保たれにくい(登録地点の大阿原湿原と同じ扱い)
+        assert estimate_rime_type("湿原系", ["盆地地形", "乾燥湿原"]) == RIME_TYPE_DEFAULT
+
+    def test_ridge_is_default(self):
+        assert estimate_rime_type("湿原系", ["盆地地形", "稜線上"]) == RIME_TYPE_DEFAULT
+        assert estimate_rime_type("湿原系", ["盆地地形", "峠"]) == RIME_TYPE_DEFAULT
+
+    def test_needs_both_wetland_and_basin(self):
+        assert estimate_rime_type("湿原系", ["水域近接"]) == RIME_TYPE_DEFAULT
+        assert estimate_rime_type("高原系", ["盆地地形", "湿原内包"]) == RIME_TYPE_DEFAULT
+
+    def test_never_spring(self):
+        # 湧水型は推定しない(水域近接・谷筋でも)
+        for mg in ("湿原系", "高原系", "", None):
+            for tags in (["谷筋", "水域近接"], ["湖畔", "水域近接"], [], None):
+                assert estimate_rime_type(mg, tags) != RIME_TYPE_SPRING
+
+    def test_empty_is_default(self):
+        assert estimate_rime_type("", []) == RIME_TYPE_DEFAULT
+        assert estimate_rime_type(None, None) == RIME_TYPE_DEFAULT

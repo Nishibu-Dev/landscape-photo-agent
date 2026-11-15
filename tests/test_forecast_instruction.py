@@ -21,3 +21,7 @@ class TestForecastInstruction:
 
     def test_no_llm_common_rule_for_rime(self):
         assert "共通条件3で判定する" not in INS
+
+    def test_unknown_spot_passes_terrain_for_rime(self):
+        assert "main_group と tags を" in INS and "fetch_forecast" in INS
+        assert "湧水型は推定しない" in INS
